@@ -15,6 +15,7 @@ export default function Create({ mode }: { mode: "Image" | "Video" | "Audio" | "
   const m = meta[mode];
   const location = useLocation();
   const workspacePrompt = (location.state as { workspacePrompt?: string } | null)?.workspacePrompt ?? "";
+  const mockup = new URLSearchParams(location.search).get("mockup") === "1";
   const model = m.model === "Demo" || hasKeys || mode === "Audio" || mode === "3D" ? m.model : `${m.model} · demo`;
   return (
     <div className="app-scroll">
@@ -22,7 +23,7 @@ export default function Create({ mode }: { mode: "Image" | "Video" | "Audio" | "
         <div className="direct-create-icon">{m.icon}</div>
         <h1 className="page-title">{m.title}</h1>
         <p className="page-sub">{m.sub}</p>
-        <Composer model={model} initialMode={mode} prompt={workspacePrompt || undefined} />
+        <Composer model={model} initialMode={mode} prompt={workspacePrompt || undefined} mockup={mockup} />
       </div>
     </div>
   );

@@ -19,7 +19,7 @@ export const PORT_COLORS: Record<PortType, string> = {
 export const NODE_COLORS: Record<WorkspaceArtifact["tool"], string> = {
   brief: "#8a929e", chat: "#796de2", launch: "#4989d5", studio: "#4d9bb0", editor: "#3da77d",
   export: "#258d6a", gallery: "#c18346", image: "#9a6bdd", video: "#428bd1", audio: "#d18a43", "3d": "#46a48b",
-  "motion-control": "#d75e83", "motion-transfer": "#ba67c8",
+  "motion-control": "#d75e83", "motion-transfer": "#ba67c8", stock: "#2aa8a0",
 };
 
 const prompt: WorkflowPort = { id: "prompt", label: "Prompt", type: "text" };
@@ -30,9 +30,7 @@ const model3d: WorkflowPort = { id: "model", label: "3D model", type: "3d" };
 
 export function inputPortsFor(artifact: WorkspaceArtifact): WorkflowPort[] {
   switch (artifact.tool) {
-    case "brief":
-    case "gallery": return [];
-    case "image": return [prompt, { ...image, id: "reference", label: "Reference" }];
+    case "stock":
     case "video": return [prompt];
     case "motion-control": return [prompt, { ...image, id: "character", label: "Character" }, { ...video, id: "motion", label: "Motion" }];
     case "motion-transfer": return [prompt, { ...image, id: "references", label: "Reference images", multiple: true, limit: 8 }, { ...video, id: "motion", label: "Motion video" }];
@@ -44,6 +42,7 @@ export function inputPortsFor(artifact: WorkspaceArtifact): WorkflowPort[] {
     case "editor": return [image, video];
     case "export": return [video];
   }
+  return [];
 }
 
 export function outputPortsFor(artifact: WorkspaceArtifact): WorkflowPort[] {
@@ -54,14 +53,15 @@ export function outputPortsFor(artifact: WorkspaceArtifact): WorkflowPort[] {
     case "video":
     case "motion-control":
     case "motion-transfer":
+    case "stock":
     case "launch":
-    case "editor":
     case "export": return [video];
     case "audio": return [audio];
     case "3d": return [model3d];
     case "chat": return [prompt, image, video, audio];
     case "studio": return [image, video];
   }
+  return [];
 }
 
 export function handleId(direction: "in" | "out", port: WorkflowPort): string {

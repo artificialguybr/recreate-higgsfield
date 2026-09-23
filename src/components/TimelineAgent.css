@@ -126,6 +126,13 @@
 .ta-legacy-media > div { display: grid; gap: 3px; color: var(--text-2); font-size: 11px; }
 .ta-legacy-media small { color: var(--text-3); font-size: 10px; }
 
+.ta-stock-results { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 9px; max-height: 420px; overflow-y: auto; }
+.ta-stock-result { display: grid; gap: 5px; min-width: 0; padding: 7px; background: var(--panel); border: 1px solid var(--line-soft); border-radius: 9px; }
+.ta-stock-result > img, .ta-stock-result > video { width: 100%; height: 92px; object-fit: cover; background: #080909; border-radius: 6px; }
+.ta-stock-result strong { overflow: hidden; color: var(--text); font-size: 10px; text-overflow: ellipsis; white-space: nowrap; }
+.ta-stock-result small { overflow: hidden; color: var(--text-3); font-size: 9px; text-overflow: ellipsis; white-space: nowrap; }
+.ta-stock-result > div { display: flex; gap: 5px; }
+.ta-stock-result .chip { min-height: 25px; flex: 1; padding: 0 5px; font-size: 9px; }
 .ta-preview-pane {
   display: flex;
   flex-direction: column;

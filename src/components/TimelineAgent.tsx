@@ -7,16 +7,94 @@ import { ASSETS_CHANGED, assetObjectUrl, getAsset, listAssets, saveAsset, type L
 import { activeWorkspaceProjectId, readWorkspaceArtifacts, upsertWorkspaceArtifact } from "../lib/workspace";
 import { fetchFeed, generate, hasKeys, type FeedModel } from "../lib/hf";
 import { bodyForModel, isSupportedModel, isUnsupportedLegacyModel } from "../lib/hfModels";
+import { bestFile, searchStock, searchStockPhotos, type StockClip, type StockPhoto } from "../lib/pexels";
+import { approveLaunchframePlan, createLaunchframePlan, exportLaunchframeWorkflow, getLaunchframeWorkflow, launchframeMediaUrl, startLaunchframeWorkflow, type LaunchframePlan, type LaunchframeVideoType } from "../lib/launchframe";
 import "./TimelineAgent.css";
 import AssetPicker from "./AssetPicker";
 const safeModel = (model: FeedModel) => isSupportedModel(model) && !isUnsupportedLegacyModel(model.mode) && (model.type === "image" || model.type === "video");
 
+type StockItem = { id: string; kind: "image" | "video"; title: string; url: string; thumb: string; credit: string; sourcePage: string; duration?: number };
 type Save = { clips: Clip[]; t: number; name: string };
-type Proposal = { prompt: string; kind: "image" | "video"; ratio: string; duration: number; model: string; phase?: string; result?: string; preview?: boolean };
+type Proposal = {
+  prompt: string;
+  kind: "image" | "video" | "launch" | "stock";
+  ratio: string;
+  duration: number;
+  model: string;
+  url?: string;
+  videoType?: LaunchframeVideoType;
+  maxBudget?: number;
+  workflowId?: string;
+  plan?: LaunchframePlan;
+  phase?: string;
+  result?: string;
+  preview?: boolean;
+  stockKind?: "image" | "video" | "both";
+  stockResults?: StockItem[];
+};
 type Message = { role: "user" | "ai"; text: string; followups?: string[]; proposal?: Proposal; legacyMode?: string; media?: { url: string; assetId?: string; kind?: string; title?: string; note?: string } };
 const EMPTY: Save = { clips: [], t: 0, name: "Untitled" };
 const RATIOS = ["16:9", "9:16", "1:1"];
 const fmt = (seconds: number) => `${Math.floor(seconds / 60)}:${Math.floor(seconds % 60).toString().padStart(2, "0")}`;
+
+function launchUrl(text: string): string | null {
+  const match = text.match(/https?:\/\/[^\s]+/i);
+  return match ? match[0].replace(/[),.!?]+$/, "") : null;
+}
+function stockQueryKind(text: string): "image" | "video" | "both" {
+  const wantsImage = /\b(photo|photos|image|images|picture|pictures|foto|fotos|imagem|imagens)\b/i.test(text);
+  const wantsVideo = /\b(video|videos|footage|b-?roll|clip|clipe)\b/i.test(text);
+  if (wantsImage && wantsVideo) return "both";
+  if (wantsImage) return "image";
+  if (wantsVideo) return "video";
+  return "both";
+}
+
+function clipToStockItem(clip: StockClip): StockItem | null {
+  const file = bestFile(clip);
+  return file ? { id: String(clip.id), kind: "video", title: "Pexels video", url: file.link, thumb: clip.picture, credit: clip.photographer, sourcePage: clip.url, duration: clip.duration } : null;
+}
+
+function photoToStockItem(photo: StockPhoto): StockItem {
+  return { id: String(photo.id), kind: "image", title: photo.alt || "Pexels photo", url: photo.src.large2x || photo.src.large || photo.src.original, thumb: photo.src.medium || photo.src.small, credit: photo.photographer, sourcePage: photo.url };
+}
+
+function LaunchProposalCard({ proposal, onChange, onApprove, busy }: {
+  proposal: Proposal & { kind: "launch" };
+  onChange: (proposal: Proposal) => void;
+  onApprove: () => void;
+  busy: boolean;
+}) {
+  const plan = proposal.plan;
+  return <div className="ta-proposal ta-launch-proposal">
+    <label>Product URL<input value={proposal.url || ""} onChange={(event) => onChange({ ...proposal, url: event.target.value })} /></label>
+    <div className="ta-proposal-fields">
+      <label>Type<select value={proposal.videoType || "A"} onChange={(event) => onChange({ ...proposal, videoType: event.target.value as LaunchframeVideoType })}><option value="A">Flash demo</option><option value="C">Concept story</option></select></label>
+      <label>Max budget<input type="number" min={0} step={0.01} value={proposal.maxBudget ?? 0.5} onChange={(event) => onChange({ ...proposal, maxBudget: Number(event.target.value) })} /></label>
+    </div>
+    {plan && <div className="ta-launch-plan"><strong>{plan.title}</strong><small>{plan.hook}</small>{plan.beats.map((beat, index) => <div key={`${beat.type}-${index}`}><span>{index + 1}</span><p>{beat.text}</p><small>{beat.duration}s</small></div>)}<b>Estimated cost: ${plan.estimatedCost.toFixed(2)}</b></div>}
+    <div className="ta-proposal-foot"><span>{proposal.phase || (plan ? `${plan.beats.length} beats ready for approval` : "Preparing plan…")}</span><button className="ta-generate" disabled={busy || !proposal.workflowId || !proposal.url?.trim()} onClick={onApprove}>{busy ? "Running…" : "Approve & run"}</button></div>
+    {proposal.result && <div className="ta-result"><video src={launchframeMediaUrl(proposal.result)} controls playsInline /><small>{proposal.phase}</small></div>}
+  </div>;
+}
+function StockProposalCard({ proposal, onAddEditor, onAddWorkspace, onUpdate }: {
+  proposal: Proposal & { kind: "stock" };
+  onAddEditor: (item: StockItem) => void;
+  onAddWorkspace: (item: StockItem) => void;
+  onUpdate: (proposal: Proposal) => void;
+}) {
+  return <div className="ta-proposal ta-stock-proposal">
+    <label>Search query<input value={proposal.prompt} onChange={(event) => onUpdate({ ...proposal, prompt: event.target.value })} /></label>
+    <div className="ta-stock-results">
+      {proposal.stockResults?.map((item) => <article className="ta-stock-result" key={`${item.kind}-${item.id}`}>
+        {item.kind === "video" ? <video src={item.url} poster={item.thumb} muted loop playsInline controls /> : <img src={item.url} srcSet={`${item.thumb} 1x`} alt={item.title} loading="lazy" />}
+        <strong>{item.title}</strong><small><a href={item.sourcePage} target="_blank" rel="noreferrer">Provided by Pexels</a> · {item.credit}{item.duration ? ` · ${item.duration}s` : ""}</small>
+        <div><button className="chip" onClick={() => onAddEditor(item)}>Add to editor</button><button className="chip" onClick={() => onAddWorkspace(item)}>Workspace</button></div>
+      </article>)}
+    </div>
+    {proposal.phase && <small role="status">{proposal.phase}</small>}
+  </div>;
+}
 
 function readSave(key: string): Save {
   try {
@@ -39,6 +117,7 @@ function readMessages(keys: string[]): Message[] {
       return role && text !== null ? [{
         role, text,
         ...(Array.isArray(item.followups) ? { followups: item.followups } : {}),
+        ...(item.proposal && typeof item.proposal === "object" ? { proposal: item.proposal as Proposal } : {}),
         ...(typeof item.mode === "string" ? { legacyMode: item.mode } : {}),
         ...(item.media && (typeof item.media.url === "string" || typeof item.media.assetId === "string") ? { media: item.media } : {}),
       }] : [];
@@ -88,6 +167,7 @@ function extractPrompt(text: string) {
 export default function TimelineAgent({ showPreview = true }: { showPreview?: boolean }) {
   const navigate = useNavigate();
   const location = useLocation();
+  const mockup = new URLSearchParams(location.search).get("mockup") === "1";
   const [projectId, setProjectId] = useState(() => activeWorkspaceProjectId());
   const saveKey = `field-editor-project:${projectId}`;
   const chatKey = `field-agent-chat:${projectId}`;
@@ -100,7 +180,7 @@ export default function TimelineAgent({ showPreview = true }: { showPreview?: bo
   const [thinking, setThinking] = useState(false);
   const [playing, setPlaying] = useState(false);
   const [notice, setNotice] = useState("");
-  const [previewOpen, setPreviewOpen] = useState(false);
+  const [previewOpen, setPreviewOpen] = useState(mockup);
   const [assetPickerOpen, setAssetPickerOpen] = useState(false);
   const [models, setModels] = useState<FeedModel[]>([]);
   const [generating, setGenerating] = useState(false);
@@ -134,6 +214,25 @@ export default function TimelineAgent({ showPreview = true }: { showPreview?: bo
   const addClip = (kind: "image" | "video", name: string, url: string) => {
     const clip = kind === "image" ? makeImageClip(url, name) : makeVideoClip(url, name, 5);
     commit((clips) => [...clips, clip]); setSelected(clip.id);
+  };
+  const saveStockItem = async (item: StockItem) => {
+    try {
+      return await saveAsset({ url: item.url, kind: item.kind, name: item.title, source: "catalog", prompt: item.title });
+    } catch (error) {
+      setNotice(error instanceof Error ? `Could not save stock media: ${error.message}` : "Could not save stock media.");
+      return undefined;
+    }
+  };
+  const addStockToEditor = async (item: StockItem) => {
+    await saveStockItem(item);
+    addClip(item.kind, item.title, item.url);
+    setNotice(`${item.kind === "image" ? "Photo" : "Video"} added to the editor.`);
+  };
+  const addStockToWorkspace = async (item: StockItem) => {
+    const asset = await saveStockItem(item);
+    upsertWorkspaceArtifact({ id: `stock-${item.kind}-${item.id}`, tool: item.kind, title: item.title, summary: `Pexels ${item.kind} · ${item.credit}`, route: `/${item.kind}`, status: "ready", prompt: item.title, outputUrl: item.url, outputKind: item.kind, outputSource: "catalog", assetId: asset?.id });
+    window.dispatchEvent(new CustomEvent("field-workspace-updated"));
+    setNotice(`${item.kind === "image" ? "Photo" : "Video"} added to the workspace.`);
   };
 
   useEffect(() => {
@@ -222,6 +321,44 @@ export default function TimelineAgent({ showPreview = true }: { showPreview?: bo
     status: () => ({ n: saveRef.current.clips.length, dur: totalDur(saveRef.current.clips), name: saveRef.current.name, res: "720", ratio: "16:9" }),
   };
   const updateMessage = (index: number, proposal: Proposal) => setMessages((items) => items.map((item, i) => i === index ? { ...item, proposal } : item));
+  const prepareLaunch = async (prior: Message[], userMessage: Message, url: string, instruction: string) => {
+    busy.current = true;
+    setMessages([...prior, userMessage]);
+    setThinking(true);
+    try {
+      const workflow = await createLaunchframePlan({ url, videoType: "A", instruction: instruction || undefined, maxBudget: 0.5, consent: true });
+      if (!workflow.plan) throw new Error("Launchframe returned no plan.");
+      const proposal: Proposal = { prompt: instruction, kind: "launch", ratio: "16:9", duration: 0, model: "", url, videoType: workflow.plan.videoType, maxBudget: workflow.plan.maxBudget, workflowId: workflow.id, plan: workflow.plan };
+      setMessages([...prior, userMessage, { role: "ai", text: "Launch plan ready for approval.", proposal }]);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "Could not prepare the launch plan.";
+      setMessages([...prior, userMessage, { role: "ai", text: `Launch plan failed: ${message}` }]);
+    } finally {
+      setThinking(false);
+      busy.current = false;
+    }
+  };
+  const prepareStock = async (prior: Message[], userMessage: Message, query: string, request: string) => {
+    busy.current = true;
+    setMessages([...prior, userMessage]);
+    setThinking(true);
+    try {
+      const kind = stockQueryKind(request);
+      const [photos, clips] = await Promise.all([
+        kind === "video" ? Promise.resolve([] as StockPhoto[]) : searchStockPhotos(query),
+        kind === "image" ? Promise.resolve([] as StockClip[]) : searchStock(query),
+      ]);
+      const results = [...photos.map(photoToStockItem), ...clips.map(clipToStockItem).filter((item): item is StockItem => item !== null)];
+      const proposal: Proposal = { prompt: query, kind: "stock", ratio: "16:9", duration: 5, model: "", stockKind: kind, stockResults: results };
+      setMessages([...prior, userMessage, { role: "ai", text: results.length ? "Stock media found. Add any photo or video to the editor or workspace." : "No stock media found for that search.", proposal }]);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "Stock search failed.";
+      setMessages([...prior, userMessage, { role: "ai", text: `Stock search failed: ${message}` }]);
+    } finally {
+      setThinking(false);
+      busy.current = false;
+    }
+  };
   const send = (raw: string) => {
     const text = raw.trim(); if (!text || busy.current) return;
     // Re-read all project-owned context at the turn boundary; same-tab writes don't emit StorageEvent.
@@ -233,12 +370,24 @@ export default function TimelineAgent({ showPreview = true }: { showPreview?: bo
     setProjectId(currentProject); history.current = []; saveRef.current = currentSave; setSave(currentSave);
     const threadKey = `field-agent-chat:${currentProject}`;
     const prior = currentProject === projectId ? messages : readMessages([threadKey, `field-editor-chat:${currentProject}`, `field-chat:${currentProject}`]);
+    const contextLine = `${title} · ${artifacts.length} workspace artifacts · ${currentSave.clips.length} timeline clips`;
+    const userMessage: Message = { role: "user", text };
+    const url = launchUrl(text);
+    if ((!url || !/\b(launch|create|make|generate)\b/i.test(text)) && /\b(stock|pexels|b-?roll|footage)\b/i.test(text)) {
+      const query = text.replace(/\b(find|search|show|get|add|stock|pexels|b-?roll|footage|video|videos|photo|photos|image|images|of|for|me|some|please)\b/gi, " ").replace(/\s+/g, " ").trim() || text;
+      setValue("");
+      void prepareStock(prior, userMessage, query, text);
+      return;
+    }
+    if (url && /\b(launch|video|product|site|url|create|make|generate)\b/i.test(text)) {
+      setValue("");
+      void prepareLaunch(prior, userMessage, url, text.replace(url, "").trim());
+      return;
+    }
     const kind = requestKind(text);
     const selectedModel = kind === "image"
       ? models.find((model) => model.type === "image" && safeModel(model))
       : models.find((model) => model.type === "video" && safeModel(model));
-    const contextLine = `${title} · ${artifacts.length} workspace artifacts · ${currentSave.clips.length} timeline clips`;
-    const userMessage: Message = { role: "user", text };
     if (kind) {
       const proposal: Proposal = { prompt: extractPrompt(text), kind, ratio: "16:9", duration: 5, model: selectedModel?.mode || "" };
       const next = [...prior, userMessage, { role: "ai" as const, text: `Generation proposal · ${contextLine}`, proposal }];
@@ -249,7 +398,36 @@ export default function TimelineAgent({ showPreview = true }: { showPreview?: bo
     setMessages([...prior, userMessage, { role: "ai", text: result.reply, followups: result.followups }]);
     setThinking(false); busy.current = false;
   };
+  const approveLaunch = async (index: number, proposal: Proposal & { kind: "launch" }) => {
+    if (generating || !proposal.workflowId || !proposal.plan || !proposal.url?.trim()) return;
+    setGenerating(true);
+    updateMessage(index, { ...proposal, phase: "Approving plan…" });
+    try {
+      await approveLaunchframePlan(proposal.workflowId, proposal.maxBudget ?? proposal.plan.maxBudget);
+      await startLaunchframeWorkflow(proposal.workflowId);
+      let workflow = await getLaunchframeWorkflow(proposal.workflowId);
+      for (let attempt = 0; attempt < 120 && workflow.status === "running"; attempt++) {
+        await new Promise<void>((resolve) => window.setTimeout(resolve, 1500));
+        workflow = await getLaunchframeWorkflow(proposal.workflowId!);
+      }
+      if (workflow.status === "failed") throw new Error(workflow.error || "Launch workflow failed.");
+      let output = workflow.videoUrl;
+      if (!output && workflow.status === "complete") output = (await exportLaunchframeWorkflow(proposal.workflowId)).videoUrl;
+      if (!output) throw new Error(`Launch workflow ended as ${workflow.status}.`);
+      const url = launchframeMediaUrl(output);
+      const name = workflow.plan?.title || proposal.plan.title || "Launch video";
+      addClip("video", name, url);
+      upsertWorkspaceArtifact({ id: `launch-${workflow.id}`, tool: "launch", title: name, summary: "Launch video added to the editor timeline.", route: "/launch", status: "ready", outputUrl: url, outputKind: "video", outputSource: "generation" });
+      window.dispatchEvent(new CustomEvent("field-workspace-updated"));
+      updateMessage(index, { ...proposal, phase: "Launch complete and added to the editor timeline.", result: url });
+    } catch (error) {
+      updateMessage(index, { ...proposal, phase: error instanceof Error ? error.message : "Launch execution failed." });
+    } finally {
+      setGenerating(false);
+    }
+  };
   const approve = async (index: number, proposal: Proposal) => {
+    if (proposal.kind === "launch" || proposal.kind === "stock") return;
     if (generating || !proposal.prompt.trim()) return;
     const model = models.find((item) => item.mode === proposal.model && item.type === proposal.kind && safeModel(item));
     if (!hasKeys) {
@@ -287,7 +465,7 @@ export default function TimelineAgent({ showPreview = true }: { showPreview?: bo
     } finally { setGenerating(false); }
   };
   const clips = save.clips;
-  const modelFor = (proposal: Proposal) => models.find((model) => model.mode === proposal.model && model.type === proposal.kind && safeModel(model));
+  const modelFor = (proposal: Proposal) => proposal.kind === "launch" || proposal.kind === "stock" ? undefined : models.find((model) => model.mode === proposal.model && model.type === proposal.kind && safeModel(model));
   const projectLabel = localStorage.getItem("field-workspace-title") || save.name || "Untitled project";
   const recentMessages = messages.filter((message) => message.role === "user" && message.text.trim()).slice(-6).reverse();
   const recentProjects = readHistoryProjectIds()
@@ -295,6 +473,26 @@ export default function TimelineAgent({ showPreview = true }: { showPreview?: bo
     .map((id) => ({ id, messages: readMessages([`field-agent-chat:${id}`, `field-editor-chat:${id}`, `field-chat:${id}`]) }))
     .filter(({ messages: items }) => items.some((message) => message.role === "user" && message.text.trim()));
   const startNewConversation = () => { setValue(""); inputRef.current?.focus(); };
+  const renderProposal = (proposal: Proposal, index: number) => {
+    if (proposal.kind === "launch") {
+      return <LaunchProposalCard proposal={proposal as Proposal & { kind: "launch" }} onChange={(next) => updateMessage(index, next)} onApprove={() => void approveLaunch(index, proposal as Proposal & { kind: "launch" })} busy={generating} />;
+    }
+    if (proposal.kind === "stock") {
+      return <StockProposalCard proposal={proposal as Proposal & { kind: "stock" }} onAddEditor={(item) => void addStockToEditor(item)} onAddWorkspace={(item) => void addStockToWorkspace(item)} onUpdate={(next) => updateMessage(index, next)} />;
+    }
+    const model = modelFor(proposal);
+    return <div className="ta-proposal">
+      <label>Prompt<textarea value={proposal.prompt} onChange={(event) => updateMessage(index, { ...proposal, prompt: event.target.value })} rows={3} /></label>
+      <div className="ta-proposal-fields">
+        <label>Type<select value={proposal.kind} onChange={(event) => { const kind = event.target.value as "image" | "video"; const nextModel = models.find((item) => item.type === kind && safeModel(item)); updateMessage(index, { ...proposal, kind, model: nextModel?.mode || "" }); }}>{["image", "video"].map((kind) => <option key={kind} value={kind}>{kind}</option>)}</select></label>
+        <label>Aspect ratio<select value={proposal.ratio} onChange={(event) => updateMessage(index, { ...proposal, ratio: event.target.value })}>{RATIOS.map((ratio) => <option key={ratio}>{ratio}</option>)}</select></label>
+        {proposal.kind === "video" && <label>Duration<select value={proposal.duration} onChange={(event) => updateMessage(index, { ...proposal, duration: Number(event.target.value) })}>{[5, 10, 15].map((seconds) => <option key={seconds} value={seconds}>{seconds}s</option>)}</select></label>}
+        <label>Model<select value={proposal.model} onChange={(event) => updateMessage(index, { ...proposal, model: event.target.value })}>{models.filter((item) => item.type === proposal.kind && safeModel(item)).map((item) => <option key={item.mode} value={item.mode}>{item.title}</option>)}{!models.some((item) => item.mode === proposal.model && safeModel(item)) && <option value="">Catalog model unavailable</option>}</select></label>
+      </div>
+      <div className="ta-proposal-foot"><span>{estimate(model, proposal)}{proposal.phase ? <small role="status">{proposal.phase}</small> : null}</span><div><button className="chip" disabled={!model?.thumb && !model?.video} onClick={() => updateMessage(index, { ...proposal, phase: "Catalog preview · not generated output", result: proposal.kind === "video" ? model?.video || model?.thumb : model?.thumb, preview: true })}>Preview</button><button className="ta-generate" disabled={generating || !proposal.prompt.trim() || !model} onClick={() => void approve(index, proposal)}>{hasKeys ? "Generate" : "Use catalog preview"}</button></div></div>
+      {proposal.result && <div className="ta-result">{proposal.kind === "video" ? <video src={proposal.result} controls playsInline /> : <img src={proposal.result} alt={proposal.preview ? "Catalog model preview" : "Generated result"} />}<small>{proposal.phase}</small></div>}
+    </div>;
+  };
 
   return <section className={`timeline-agent${showPreview ? (previewOpen ? "" : " no-preview") : " embedded"}`} aria-label="Agent">
     <aside className="ta-history" aria-label="Agent history">
@@ -320,15 +518,7 @@ export default function TimelineAgent({ showPreview = true }: { showPreview?: bo
       <div className="ta-thread" aria-live="polite">
         {!messages.length && <div className="ta-welcome"><strong>What are we making?</strong><p>Chat, propose image or video generation, or edit the active timeline. Timeline changes are undoable.</p><div className="follows">{["Create an image of a quiet coastal town", "I need a video of a desert at sunset", "status", 'caption "Made with Field"'].map((suggestion) => <button className="chip" key={suggestion} onClick={() => send(suggestion)}>{suggestion}</button>)}</div></div>}
         {messages.map((message, index) => <div key={`${index}-${message.role}`} className={`bubble ${message.role}`}>{message.text}{message.legacyMode && <small className="ta-legacy-mode">{message.legacyMode}</small>}{message.media && <div className="ta-legacy-media">{message.media.kind === "video" ? <video src={message.media.url} controls playsInline /> : <img src={message.media.url} alt={message.media.title || "Shared media"} />}<div>{message.media.title && <strong>{message.media.title}</strong>}{message.media.note && <small>{message.media.note}</small>}</div></div>}{message.role === "ai" && message.followups?.length ? <div className="follows">{message.followups.map((suggestion) => <button className="chip" key={suggestion} onClick={() => send(suggestion)}>{suggestion}</button>)}</div> : null}
-          {message.proposal && (() => { const proposal = message.proposal!; const model = modelFor(proposal); return <div className="ta-proposal">
-            <label>Prompt<textarea value={proposal.prompt} onChange={(event) => updateMessage(index, { ...proposal, prompt: event.target.value })} rows={3} /></label>
-            <div className="ta-proposal-fields"><label>Type<select value={proposal.kind} onChange={(event) => { const kind = event.target.value as "image" | "video"; const model = models.find((item) => item.type === kind && safeModel(item)); updateMessage(index, { ...proposal, kind, model: model?.mode || "" }); }}>{["image", "video"].map((kind) => <option key={kind} value={kind}>{kind}</option>)}</select></label>
-              <label>Aspect ratio<select value={proposal.ratio} onChange={(event) => updateMessage(index, { ...proposal, ratio: event.target.value })}>{RATIOS.map((ratio) => <option key={ratio}>{ratio}</option>)}</select></label>
-              {proposal.kind === "video" && <label>Duration<select value={proposal.duration} onChange={(event) => updateMessage(index, { ...proposal, duration: Number(event.target.value) })}>{[5, 10, 15].map((seconds) => <option key={seconds} value={seconds}>{seconds}s</option>)}</select></label>}
-              <label>Model<select value={proposal.model} onChange={(event) => updateMessage(index, { ...proposal, model: event.target.value })}>{models.filter((item) => item.type === proposal.kind && safeModel(item)).map((item) => <option key={item.mode} value={item.mode}>{item.title}</option>)}{!models.some((item) => item.mode === proposal.model && safeModel(item)) && <option value="">Catalog model unavailable</option>}</select></label></div>
-            <div className="ta-proposal-foot"><span>{estimate(model, proposal)}{proposal.phase ? <small role="status">{proposal.phase}</small> : null}</span><div><button className="chip" disabled={!model?.thumb && !model?.video} onClick={() => updateMessage(index, { ...proposal, phase: "Catalog preview · not generated output", result: proposal.kind === "video" ? model?.video || model?.thumb : model?.thumb, preview: true })}>Preview</button><button className="ta-generate" disabled={generating || !proposal.prompt.trim() || !model} onClick={() => void approve(index, proposal)}>{hasKeys ? "Generate" : "Use catalog preview"}</button></div></div>
-            {proposal.result && <div className="ta-result">{proposal.kind === "video" ? <video src={proposal.result} controls playsInline /> : <img src={proposal.result} alt={proposal.preview ? "Catalog model preview" : "Generated result"} />}<small>{proposal.phase}</small></div>}
-          </div>; })()}
+          {message.proposal && renderProposal(message.proposal, index)}
         </div>)}
         {thinking && <div className="bubble ai thinking"><span /><span /><span /></div>}<div ref={endRef} />
       </div>

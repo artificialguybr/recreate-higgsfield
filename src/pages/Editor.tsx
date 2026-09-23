@@ -9,6 +9,7 @@ import TimelineAgent from "../components/TimelineAgent";
 import AssetPicker from "../components/AssetPicker";
 import { activeWorkspaceProjectId, upsertWorkspaceArtifact } from "../lib/workspace";
 import { assetObjectUrl, deleteAsset, listAssets, LocalAsset, saveAsset, ASSETS_CHANGED } from "../lib/assets";
+import { bestFile, searchStock, searchStockPhotos, type StockClip, type StockPhoto } from "../lib/pexels";
 const FPS = 30;
 const PX0 = 72;
 const ZOOMS = [24, 48, 72, 120];
@@ -26,6 +27,12 @@ const DIM: Record<Ratio, Record<Res, [number, number]>> = {
   "1:1": { "720": [960, 960], "1080": [1080, 1080] },
 };
 
+type StockResult = { id: string; kind: "image" | "video"; title: string; url: string; thumb: string; credit: string; sourcePage: string; duration?: number };
+const stockFromPhoto = (photo: StockPhoto): StockResult => ({ id: String(photo.id), kind: "image", title: photo.alt || "Pexels photo", url: photo.src.large2x || photo.src.large || photo.src.original, thumb: photo.src.medium || photo.src.small, credit: photo.photographer, sourcePage: photo.url });
+const stockFromClip = (clip: StockClip): StockResult | null => {
+  const file = bestFile(clip);
+  return file ? { id: String(clip.id), kind: "video", title: "Pexels video", url: file.link, thumb: clip.picture, credit: clip.photographer, sourcePage: clip.url, duration: clip.duration } : null;
+};
 type Source = { url: string; blob?: Blob };
 
 function proxyMedia(url: string): string {
@@ -104,7 +111,6 @@ const fmt = (s: number) => {
 
 const patchClip = (cs: Clip[], id: string, p: Partial<Clip>) =>
   cs.map((x) => (x.id === id ? { ...x, ...p } : x));
-
 export default function Editor() {
   const projectSaveKey = `${SAVE_KEY}:${activeWorkspaceProjectId()}`;
   const [clips, setClips] = useState<Clip[]>([]);
@@ -114,6 +120,12 @@ export default function Editor() {
   const [chatOpen, setChatOpen] = useState(false);
   const [genOpen, setGenOpen] = useState(false);
   const [assetPickerOpen, setAssetPickerOpen] = useState(false);
+  const [stockOpen, setStockOpen] = useState(false);
+  const [stockQuery, setStockQuery] = useState("");
+  const [stockMode, setStockMode] = useState<"both" | "image" | "video">("both");
+  const [stockResults, setStockResults] = useState<StockResult[]>([]);
+  const [stockBusy, setStockBusy] = useState(false);
+  const [stockError, setStockError] = useState("");
   const [genPrompt, setGenPrompt] = useState("");
   const [busy, setBusy] = useState(false);
   const [lib, setLib] = useState<LocalAsset[]>([]);
@@ -406,6 +418,44 @@ export default function Editor() {
     commitFn((cs) => [...cs, c]);
     setSel(c.id);
     flash("Added image");
+  };
+  const searchEditorStock = async () => {
+    const query = stockQuery.trim();
+    if (!query || stockBusy) return;
+    setStockBusy(true);
+    setStockError("");
+    try {
+      const [photos, videos] = await Promise.all([
+        stockMode === "video" ? Promise.resolve([] as StockPhoto[]) : searchStockPhotos(query),
+        stockMode === "image" ? Promise.resolve([] as StockClip[]) : searchStock(query),
+      ]);
+      setStockResults([...photos.map(stockFromPhoto), ...videos.map(stockFromClip).filter((item): item is StockResult => item !== null)]);
+    } catch (error) {
+      setStockResults([]);
+      setStockError(error instanceof Error ? error.message : "Could not search stock media.");
+    } finally {
+      setStockBusy(false);
+    }
+  };
+  const addStockToEditor = async (item: StockResult) => {
+    try {
+      const asset = await saveAsset({ url: item.url, kind: item.kind, name: item.title, source: "catalog", prompt: stockQuery });
+      refreshLib();
+      await libToTimeline(asset);
+      flash(`${item.kind === "image" ? "Photo" : "Video"} added from Pexels`);
+    } catch (error) {
+      flash(error instanceof Error ? error.message : "Could not add stock media");
+    }
+  };
+  const addStockToWorkspace = async (item: StockResult) => {
+    try {
+      const asset = await saveAsset({ url: item.url, kind: item.kind, name: item.title, source: "catalog", prompt: stockQuery });
+      upsertWorkspaceArtifact({ id: `stock-${item.kind}-${item.id}`, tool: item.kind, title: item.title, summary: `Pexels ${item.kind} · ${item.credit}`, route: `/${item.kind}`, status: "ready", prompt: stockQuery, outputUrl: item.url, outputKind: item.kind, outputSource: "catalog", assetId: asset.id });
+      window.dispatchEvent(new CustomEvent("field-workspace-updated"));
+      flash(`${item.kind === "image" ? "Photo" : "Video"} sent to Workspace`);
+    } catch (error) {
+      flash(error instanceof Error ? error.message : "Could not send stock media to Workspace");
+    }
   };
 
   const onFiles = (files: FileList | null, input: HTMLInputElement) => {
@@ -783,6 +833,13 @@ export default function Editor() {
             }} aria-label="Toggle editor chat">
               <Chat size={13} /> Chat
             </button>
+            <button className={`chip${stockOpen ? " on" : ""}`} onClick={() => {
+              setStockOpen((open) => !open);
+              setChatOpen(false);
+              setGenOpen(false);
+            }} aria-label="Search stock media">
+              <Film size={13} /> Stock
+            </button>
             <button className={`chip gen-chip${genOpen ? " on" : ""}`} onClick={() => {
               setGenPrompt("");
               setGenOpen((open) => {
@@ -880,6 +937,32 @@ export default function Editor() {
               <button className="chip" onClick={addUrl}>Add</button>
             </div>
           </div>
+          {stockOpen && (
+            <div className="ed-cats ed-stock-panel">
+              <div className="ed-cats-head">
+                <div><div className="ed-cats-t">Stock media</div><small>Photos and videos from Pexels</small></div>
+                <button className="chip" type="button" onClick={() => setStockOpen(false)}>Close</button>
+              </div>
+              <div className="ed-stock-controls">
+                <select value={stockMode} onChange={(event) => setStockMode(event.target.value as "both" | "image" | "video")}>
+                  <option value="both">Photos + videos</option>
+                  <option value="image">Photos</option>
+                  <option value="video">Videos</option>
+                </select>
+                <input value={stockQuery} placeholder="Search sunsets, city, hands…" onChange={(event) => setStockQuery(event.target.value)} onKeyDown={(event) => { if (event.key === "Enter") void searchEditorStock(); }} />
+                <button className="chip" type="button" disabled={stockBusy || !stockQuery.trim()} onClick={() => void searchEditorStock()}>{stockBusy ? "Searching…" : "Search"}</button>
+              </div>
+              {stockError && <div className="ed-stock-error" role="alert">{stockError}</div>}
+              {stockResults.length > 0 && <div className="ed-stock-grid">{stockResults.map((item) => (
+                <article className="ed-stock-card" key={`${item.kind}-${item.id}`}>
+                  {item.kind === "video" ? <video src={item.url} poster={item.thumb} muted loop playsInline controls /> : <img src={item.url} srcSet={`${item.thumb} 1x`} alt={item.title} loading="lazy" />}
+                  <strong>{item.title}</strong>
+                  <small><a href={item.sourcePage} target="_blank" rel="noreferrer">Provided by Pexels</a> · {item.credit}{item.duration ? ` · ${item.duration}s` : ""}</small>
+                  <div><button className="chip" type="button" onClick={() => void addStockToEditor(item)}>Add to timeline</button><button className="chip" type="button" onClick={() => void addStockToWorkspace(item)}>Workspace</button></div>
+                </article>
+              ))}</div>}
+            </div>
+          )}
 
           {selected && (
             <div className="ed-props">

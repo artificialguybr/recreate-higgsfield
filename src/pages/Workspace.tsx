@@ -23,6 +23,7 @@ import {
   inputPortsFor, normalizeConnections, MARKETING_IMAGE_MODE, outputPortsFor, promptForNode,
   NODE_COLORS, PORT_COLORS, type ConnectedInput, type WorkflowPort,
 } from "../lib/workflowPorts";
+import { bestFile, searchStock, stockConfigured, type StockClip } from "../lib/pexels";
 import { defaultsForModel, modelSchema, type ModelSchema } from "../lib/hfModels";
 
 // Generator nodes expose verified catalog-backed model IDs, not one node per model.
@@ -59,18 +60,26 @@ interface NodeData extends WorkspaceArtifact, Record<string, unknown> {
   busy?: boolean;
   requestStatus?: string;
   noKeys?: boolean;
+  onSearchStock?: (id: string, query: string) => void;
+  onPickStock?: (id: string, clipUrl: string, clipName: string, credit: string) => void;
+  stockResults?: StockClip[];
+  stockBusy?: boolean;
+  stockError?: string;
   assetSaveError?: string;
 }
 type WorkspaceNode = Node<NodeData, "artifact">;
+
 type ToolOption = { tool: WorkspaceTool; title: string; description: string; route: string };
+
  
 const TOOLS: ToolOption[] = [
   { tool: "image", title: "Image", description: "Generate a still or use image inputs.", route: "/image" },
   { tool: "video", title: "Video", description: "Generate a shot from connected text.", route: "/video" },
-  { tool: "motion-control", title: "Motion control", description: "Drive a character image with a motion video.", route: "/video" },
-  { tool: "motion-transfer", title: "Motion transfer", description: "Transfer motion to up to eight reference images.", route: "/video" },
   { tool: "audio", title: "Audio", description: "Prepare a prompt for an audio model.", route: "/audio" },
   { tool: "3d", title: "3D", description: "Prepare a prompt for a 3D model.", route: "/3d" },
+  { tool: "motion-control", title: "Motion control", description: "Drive a character image with a motion video.", route: "/video" },
+  { tool: "motion-transfer", title: "Motion transfer", description: "Transfer motion to up to eight reference images.", route: "/video" },
+  { tool: "stock", title: "Stock footage", description: "Find free Pexels b-roll from a prompt.", route: "/video" },
   { tool: "chat", title: "Chat", description: "Explore ideas and generate assets.", route: "/chat" },
   { tool: "launch", title: "Launch", description: "Turn a product URL into a launch video.", route: "/launch" },
   { tool: "studio", title: "Studio", description: "Shape scenes and cinematic structure.", route: "/studio" },
@@ -83,25 +92,25 @@ const TOOL_GROUPS: { label: string; tools: ToolOption[] }[] = [
   { label: "Generate", tools: (["image", "video", "audio", "3d"] as WorkspaceTool[]).map(byTool) },
   { label: "Motion", tools: (["motion-control", "motion-transfer"] as WorkspaceTool[]).map(byTool) },
   { label: "Surfaces", tools: (["launch", "studio", "editor", "export"] as WorkspaceTool[]).map(byTool) },
-  { label: "Library", tools: (["gallery"] as WorkspaceTool[]).map(byTool) },
+  { label: "Library", tools: (["gallery", "stock"] as WorkspaceTool[]).map(byTool) },
 ];
 
 const POSITIONS: Record<WorkspaceTool, { x: number; y: number }> = {
   brief: { x: 30, y: 180 }, chat: { x: 340, y: 20 }, launch: { x: 340, y: 270 },
   gallery: { x: 340, y: 520 }, image: { x: 650, y: 20 }, video: { x: 650, y: 270 }, audio: { x: 960, y: 20 },
   "3d": { x: 960, y: 270 }, studio: { x: 960, y: 520 }, editor: { x: 1270, y: 180 }, export: { x: 1580, y: 180 },
-  "motion-control": { x: 1270, y: 20 }, "motion-transfer": { x: 1270, y: 320 },
+  "motion-control": { x: 1270, y: 20 }, "motion-transfer": { x: 1270, y: 320 }, stock: { x: 340, y: 770 },
 };
- 
+
 const EMPTY_EDGES: Edge[] = [];
 const NODE_HEIGHTS: Record<WorkspaceTool, number> = {
-  brief: 180, chat: 240, launch: 220, gallery: 200, studio: 240, editor: 220, export: 220,
+  brief: 180, chat: 240, launch: 220, gallery: 200, studio: 240, editor: 220, export: 220, stock: 220,
   image: 280, video: 260, audio: 240, "3d": 240, "motion-control": 280, "motion-transfer": 300,
 };
 
 const OUTPUT_NODE_HEIGHTS: Partial<Record<WorkspaceTool, number>> = {
   chat: 360, launch: 340, studio: 340, editor: 340, export: 340, image: 390,
-  video: 360, audio: 320, "3d": 300, "motion-control": 360, "motion-transfer": 380,
+  video: 360, audio: 320, "3d": 300, "motion-control": 360, "motion-transfer": 380, stock: 300,
 };
 function flowEdges(connections: WorkspaceConnection[], artifacts: WorkspaceArtifact[]): Edge[] {
   return normalizeConnections(connections, artifacts).map((edge) => {
@@ -141,7 +150,7 @@ function iconForTool(tool: WorkspaceTool) {
 
 function nodeFromArtifact(
   artifact: WorkspaceArtifact & Pick<NodeData, "assetSaveError">,
-  callbacks: Pick<NodeData, "onOpen" | "onOpenGallery" | "onPatch" | "onGenerate" | "onSendEditor" | "onDetails" | "busy" | "requestStatus" | "noKeys">,
+  callbacks: Pick<NodeData, "onOpen" | "onOpenGallery" | "onPatch" | "onGenerate" | "onSendEditor" | "onDetails" | "busy" | "requestStatus" | "noKeys" | "onSearchStock" | "onPickStock" | "stockResults" | "stockBusy" | "stockError">,
   inputs: ConnectedInput[], position?: { x: number; y: number }, selected = false,
 ): WorkspaceNode {
   return { id: artifact.id, type: "artifact", position: position ?? POSITIONS[artifact.tool], selected, data: { ...artifact, ...callbacks, inputs } };
@@ -199,8 +208,26 @@ function ArtifactNode({ data, selected }: NodeProps<WorkspaceNode>) {
     <div className={`workspace-node ${artifact.status}${selected ? " selected" : ""} workflow-node-${artifact.tool}`} style={{ "--node-color": NODE_COLORS[artifact.tool] } as CSSProperties}>
       <div className="workspace-node-top"><span className="workspace-node-icon">{iconForTool(artifact.tool)}</span><span className="workspace-node-kind">{artifact.tool.replace("-", " ") === "3d" ? "3D" : artifact.tool.replace("-", " ")}</span><span className="workspace-node-status"><i />{artifact.status}</span></div>
       <strong>{artifact.title}</strong>
-      <PortRows direction="in" ports={inputPortsFor(artifact)} />
+      <PortRows direction="in" ports={inputPortsFor(artifact) ?? []} />
       {artifact.tool === "gallery" ? <button className="workflow-node-details nodrag" onClick={() => artifact.onOpenGallery?.()}>Open gallery <ArrowRight size={11} /></button> : <button className="workflow-node-details nodrag" onClick={() => artifact.onDetails?.(artifact.id)}>View {artifact.outputUrl ? "asset" : "details"} <ArrowRight size={11} /></button>}
+      {artifact.tool === "stock" && <div className="workflow-node-stock">
+        <p>{artifact.summary}</p>
+        <div className="workflow-stock-search">
+          <textarea className="workflow-node-prompt nodrag" rows={1} placeholder={inheritedPrompt || "Describe the b-roll you need (e.g. city timelapse)…"} value={prompt} onChange={(event) => artifact.onPatch?.(artifact.id, { prompt: event.target.value })} />
+          <button className="workflow-node-action nodrag" disabled={!artifact.onSearchStock || artifact.stockBusy || !prompt.trim()} onClick={() => artifact.onSearchStock?.(artifact.id, prompt)}>{artifact.stockBusy ? "Searching…" : "Find footage"}</button>
+        </div>
+        {artifact.stockError && <span className="workspace-node-error" role="alert">{artifact.stockError}</span>}
+        {artifact.stockResults && artifact.stockResults.length > 0 && <div className="workflow-stock-grid">{artifact.stockResults.map((clip) => {
+          const file = bestFile(clip);
+          return <button key={clip.id} className="workflow-stock-item nodrag" disabled={!artifact.onPickStock} onClick={() => artifact.onPickStock?.(artifact.id, file?.link ?? clip.files[0]?.link ?? clip.url, `${clip.photographer} · ${clip.url.split("/").pop()?.split("-")[0]}`, clip.photographer)}>
+            <span className="workflow-stock-thumb"><img src={clip.picture} alt="" loading="lazy" /></span>
+            <small>{clip.photographer} · {clip.duration}s</small>
+            <b>Use in timeline</b>
+          </button>;
+        })}</div>}
+        <a className="workflow-stock-credit" href="https://www.pexels.com" target="_blank" rel="noreferrer">Photos and videos provided by Pexels</a>
+        {artifact.stockResults && artifact.stockResults.length === 0 && <span className="workspace-node-hint">No footage found — try another phrase.</span>}
+      </div>}
       {isGenerator && <>
         <div className="workflow-node-label">Selected upstream inputs</div><InputAssets inputs={inputs} />
         <textarea className="workflow-node-prompt nodrag" rows={2} value={prompt} placeholder={inheritedPrompt || (artifact.tool === "image" ? "Describe the image…" : artifact.tool === "video" ? "Describe the shot…" : "Add an optional direction…")} onChange={(event) => artifact.onPatch?.(artifact.id, { prompt: event.target.value })} />
@@ -218,7 +245,7 @@ function ArtifactNode({ data, selected }: NodeProps<WorkspaceNode>) {
       {artifact.tool === "export" && <><p>{artifact.summary}</p><InputAssets inputs={inputs} /><button className="workspace-node-open" onClick={() => artifact.onOpen?.(artifact.route)}>Open Editor <ArrowRight size={13} /></button></>}
       {artifact.tool === "gallery" && <><p>{artifact.summary}</p><span className="workflow-node-hint">Image and video assets from the shared local library.</span></>}
       {!isGenerator && !isUnsupported && artifact.tool !== "brief" && artifact.tool !== "chat" && artifact.tool !== "editor" && artifact.tool !== "export" && artifact.tool !== "gallery" && <><p>{artifact.summary}</p><InputAssets inputs={inputs} /><OutputAsset artifact={artifact} /><button className="workspace-node-open" onClick={() => artifact.onOpen?.(artifact.route, inheritedPrompt)}>Open {artifact.title} <ArrowRight size={13} /></button></>}
-      <PortRows direction="out" ports={outputPortsFor(artifact)} />
+      <PortRows direction="out" ports={outputPortsFor(artifact) ?? []} />
     </div>
   );
 }
@@ -419,6 +446,9 @@ export default function Workspace() {
   const [assets, setAssets] = useState<LocalAsset[]>([]);
   const assetsRef = useRef(assets);
   const [assetSaveErrors, setAssetSaveErrors] = useState<Record<string, string>>({});
+  const [stockResults, setStockResults] = useState<StockClip[]>([]);
+  const [stockBusy, setStockBusy] = useState(false);
+  const [stockError, setStockError] = useState("");
   useEffect(() => {
     const clean = sanitizeArtifacts(readWorkspaceArtifacts());
     saveWorkspaceArtifacts(clean);
@@ -473,6 +503,32 @@ export default function Workspace() {
     setPending(url, kind);
     navigate("/editor");
   }, [navigate]);
+
+  const searchStockFor = async (id: string, query: string) => {
+    if (stockBusy) return;
+    setStockBusy(true); setStockError("");
+    patchArtifact(id, { status: "active", summary: `Searching Pexels for ${query.slice(0, 60)}...` });
+    try {
+      const clips = await searchStock(query);
+      setStockResults(clips);
+      patchArtifact(id, { status: clips.length ? "ready" : "draft", summary: clips.length ? `${clips.length} stock clips found — pick one to use.` : "No stock clips found — try another phrase." });
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "Stock search failed.";
+      setStockError(message);
+      patchArtifact(id, { status: "failed", summary: message });
+    } finally {
+      setStockBusy(false);
+    }
+  };
+
+  const pickStock = (id: string, clipUrl: string, clipName: string, credit: string) => {
+    void saveAsset({ url: clipUrl, kind: "video", name: clipName, source: "catalog" }).then((asset) => {
+      upsertWorkspaceArtifact({ id, tool: "stock", title: clipName, summary: `Pexels footage · ${credit}`, route: "/video", status: "ready", outputUrl: asset.remoteUrl ?? clipUrl, outputKind: "video", outputSource: "catalog", assetId: asset.id, prompt: artifactsRef.current.find((item) => item.id === id)?.prompt });
+      window.dispatchEvent(new CustomEvent("field-workspace-updated"));
+    }).catch((error) => {
+      patchArtifact(id, { summary: `Local save failed: ${error instanceof Error ? error.message : "unknown"}` });
+    });
+  };
 
   const runGeneration = async (id: string) => {
     const artifact = artifactsRef.current.find((item) => item.id === id);
@@ -565,10 +621,10 @@ export default function Workspace() {
       const inputs = connectedInputsFor(artifact, edges, renderArtifacts);
       return nodeFromArtifact({ ...artifact, assetSaveError: assetSaveErrors[artifact.id] }, {
         onOpen: openArtifact, onOpenGallery: openGallery, onPatch: patchArtifact, onGenerate: runGeneration, onSendEditor: sendToEditor, onDetails: openDetails,
-        busy: runningId === artifact.id, requestStatus, noKeys: !hasKeys,
+        onSearchStock: searchStockFor, onPickStock: pickStock, stockResults, stockBusy, stockError,
       }, inputs, positions[artifact.id], artifact.id === selectedId);
     }));
-  }, [artifacts, assets, assetSaveErrors, edges, openArtifact, openDetails, openGallery, patchArtifact, requestStatus, runningId, selectedId, sendToEditor, setNodes]);
+  }, [artifacts, assets, assetSaveErrors, edges, openArtifact, openDetails, openGallery, patchArtifact, requestStatus, runningId, selectedId, sendToEditor, setNodes, stockResults, stockBusy, stockError]);
 
   useEffect(() => {
     if (nodes.length) saveWorkspacePositions(Object.fromEntries(nodes.map((node) => [node.id, node.position])) as WorkspacePositions);

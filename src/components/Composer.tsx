@@ -64,8 +64,20 @@ function gradientStyle(url: string): React.CSSProperties {
   return { background: `linear-gradient(${angle}deg, ${a}, ${b})` };
 }
 
-const COST: Record<Mode, string> = { Image: "≈ $0.003", Video: "≈ $0.21", Audio: "—", "3D": "—" };
+const COST: Record<Mode, string> = { Image: "≈ $0.003", Video: "≈ $0.21", Audio: "≈ $0.05/1k chars", "3D": "—" };
 
+const MOCK_IMAGE = "https://images.unsplash.com/photo-1523275335684-37898b6baf30?auto=format&fit=crop&w=1200&q=85";
+const MOCK_VIDEO = "https://interactive-examples.mdn.mozilla.net/media/cc0-videos/flower.mp4";
+
+function mockResult(mode: Mode): GenResult {
+  return { url: mode === "Video" ? MOCK_VIDEO : MOCK_IMAGE, kind: mode === "Video" ? "video" : "image" };
+}
+
+function mockPrompt(mode: Mode): string {
+  return mode === "Video"
+    ? "A slow editorial camera move through warm evening light, revealing a sculptural glass fragrance bottle."
+    : "A sculptural glass perfume bottle on warm limestone, late afternoon light, restrained editorial product photography.";
+}
 function pickDemo(pool: FeedModel[], p: string, m: Mode): GenResult | null {
   const wantVideo = m === "Video";
   const cands = pool.filter((x) => (wantVideo ? x.video : x.thumb));
@@ -79,18 +91,15 @@ function ratioStyle(ratio: string): React.CSSProperties | undefined {
   const [w, h] = ratio.split(":").map(Number);
   return { aspectRatio: `${w} / ${h}` };
 }
-
 function labelForModel(item: FeedModel | undefined, fallback: string) {
   return item?.title || fallback;
 }
 function publicUrls(value: string) {
   return value.split(/\r?\n|,/).map((item) => item.trim()).filter(Boolean);
 }
-
 function invalidPublicUrl(value: string) {
   return publicUrls(value).some((item) => !/^https:\/\//i.test(item));
 }
-
 
 export default function Composer({
   model = "Field 1",
@@ -98,19 +107,21 @@ export default function Composer({
   initialMode = "Image",
   prompt: promptProp,
   onPrompt,
+  mockup = false,
 }: {
   model?: string;
   placeholder?: string;
   initialMode?: Mode;
   prompt?: string;
   onPrompt?: (v: string) => void;
+  mockup?: boolean;
 }) {
   const navigate = useNavigate();
   const [mode, setMode] = useState<Mode>(initialMode);
-  const [prompt, setPrompt] = useState(promptProp ?? "");
-  const [phase, setPhase] = useState<Phase>("idle");
+  const [prompt, setPrompt] = useState(promptProp ?? (mockup ? mockPrompt(initialMode) : ""));
+  const [phase, setPhase] = useState<Phase>(mockup ? "done" : "idle");
   const [status, setStatus] = useState("");
-  const [result, setResult] = useState<GenResult | null>(null);
+  const [result, setResult] = useState<GenResult | null>(mockup ? mockResult(initialMode) : null);
   const [error, setError] = useState("");
   const [saveError, setSaveError] = useState("");
   const [demoPool, setDemoPool] = useState<FeedModel[] | null>(null);
@@ -240,7 +251,7 @@ export default function Composer({
       { imageUrls: publicUrls(videoElementUrl), videoUrl: videoRefUrl.trim() || undefined },
     );
   const syncWorkspaceAsset = (p: string, phase: "active" | "ready" | "failed", output?: GenResult, error = "", assetId?: string) => {
-    if (mode !== "Image" && mode !== "Video") return;
+    if (mode !== "Image" && mode !== "Video" && mode !== "Audio" && mode !== "3D") return;
     const tool = mode.toLowerCase() as "image" | "video";
     const hasMedia = Boolean(output && !output.url.startsWith("gradient:"));
     upsertWorkspaceArtifact({
@@ -261,6 +272,17 @@ export default function Composer({
     });
   };
 
+  const audioPayload = (p: string): Record<string, unknown> => ({
+    prompt: audioTab === "tts" && audioScript.trim() ? audioScript : p,
+    ...(voiceDetails.trim() ? { voice_description: voiceDetails.trim() } : {}),
+  });
+
+  const threePayload = (p: string): Record<string, unknown> => ({
+    prompt: p,
+    resolution: threeOpts.resolution,
+    mesh_quality: threeOpts.mesh.toLowerCase(),
+  });
+
   const generateWork = async () => {
     setSaveError("");
     const p = (mode === "Audio" && audioTab === "tts" && audioScript.trim() ? audioScript : prompt).trim();
@@ -270,12 +292,11 @@ export default function Composer({
       setPhase("error");
       return;
     }
-    busy.current = true;
     setError("");
     setResult(null);
     setPhase("working");
     syncWorkspaceAsset(p, "active");
-    if (!hasKeys || mode === "Audio" || mode === "3D") {
+    if (!hasKeys) {
       await new Promise((r) => setTimeout(r, 900));
       const r = await demoResult(p, mode);
       setResult(r);
@@ -285,8 +306,8 @@ export default function Composer({
       return;
     }
     try {
-      const endpoint = mode === "Image" ? selectedModeId || MARKETING_IMAGE_MODE : videoTab === "motion" ? MOTION_CONTROL_MODE : selectedModeId || VIDEO_MODE;
-      const body = mode === "Image" ? imagePayload(p) : videoPayload(p);
+      const endpoint = mode === "Image" ? selectedModeId || MARKETING_IMAGE_MODE : videoTab === "motion" ? MOTION_CONTROL_MODE : mode === "Audio" ? "field/audio/seed-1" : mode === "3D" ? "field/3d" : selectedModeId || VIDEO_MODE;
+      const body = mode === "Image" ? imagePayload(p) : mode === "Audio" ? audioPayload(p) : mode === "3D" ? threePayload(p) : videoPayload(p);
       const r = await generate(endpoint, body, (s) => setStatus(s));
       setResult(r);
       syncWorkspaceAsset(p, "ready", r);
@@ -447,8 +468,8 @@ export default function Composer({
         </div>
       </div>
       <button type="button" className="composer-gallery" onClick={() => navigate("/assets")}>Gallery <span aria-hidden="true">↗</span></button>
-      {phase === "working" && <div className="result"><div className="result-bar pad"><span className="ring small" /><span className="result-cap">{status ? `Request ${status} — generating…` : "Generating…"}</span><span className="result-cost">{hasKeys && mode !== "Audio" && mode !== "3D" ? "higgsfield.ai" : "demo"}</span></div></div>}
-      {phase === "done" && result && <div className="result">{result.url.startsWith("gradient:") ? <div className="result-video" style={{ ...gradientStyle(result.url), ...ratioStyle(resultRatio) }} /> : result.kind === "video" ? <video className="result-video" style={ratioStyle(resultRatio)} src={result.url} autoPlay loop muted playsInline /> : <img className="result-video" style={ratioStyle(resultRatio)} src={result.url} alt={prompt} />}<div className="result-bar"><span className="result-tag">{mode}</span><span className="result-cap">{prompt}</span>{!hasKeys && <span className="result-demo">demo</span>}<span className="result-cost">{hasKeys && mode !== "Audio" && mode !== "3D" ? COST[mode] : "free"}</span>{!result.url.startsWith("gradient:") && <button className="chip" onClick={() => { setPending(result.url, result.kind === "image" ? "image" : "video"); navigate("/editor"); }}><Film size={13} /> Editor</button>}<button className="chip" onClick={() => { setResult(null); setPhase("idle"); }}>Generate again</button>{hasKeys && <a className="chip" href={result.url} target="_blank" rel="noreferrer"><Check size={13} /> Open</a>}</div></div>}
+      {phase === "working" && <div className="result"><div className="result-bar pad"><span className="ring small" /><span className="result-cap">{status ? `Request ${status} — generating…` : "Generating…"}</span><span className="result-cost">{hasKeys ? "higgsfield.ai" : "demo"}</span></div></div>}
+      {phase === "done" && result && <div className="result">{result.url.startsWith("gradient:") ? <div className="result-video" style={{ ...gradientStyle(result.url), ...ratioStyle(resultRatio) }} /> : result.kind === "video" ? <video className="result-video" style={ratioStyle(resultRatio)} src={result.url} autoPlay loop muted playsInline /> : result.kind === "audio" ? <audio className="result-audio" src={result.url} controls /> : <img className="result-video" style={ratioStyle(resultRatio)} src={result.url} alt={prompt} />}<div className="result-bar"><span className="result-tag">{mode}</span><span className="result-cap">{prompt}</span>{!hasKeys && <span className="result-demo">demo</span>}<span className="result-cost">{hasKeys ? COST[mode] : "free"}</span>{!result.url.startsWith("gradient:") && <button className="chip" onClick={() => { setPending(result.url, result.kind === "image" ? "image" : "video"); navigate("/editor"); }}><Film size={13} /> Editor</button>}<button className="chip" onClick={() => { setResult(null); setPhase("idle"); }}>Generate again</button>{hasKeys && <a className="chip" href={result.url} target="_blank" rel="noreferrer"><Check size={13} /> Open</a>}</div></div>}
       {saveError && <div className="result"><div className="result-bar pad"><span className="result-tag" style={{ color: "#f0a44c" }}>Not saved</span><span className="result-cap">{saveError}</span></div></div>}
       {phase === "error" && <div className="result"><div className="result-bar pad"><span className="result-tag" style={{ color: "#f0a44c" }}>Failed</span><span className="result-cap">{error}</span><button className="chip" onClick={() => void generateWork()}>Try again</button></div></div>}
     </div>

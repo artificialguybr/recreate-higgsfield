@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from "react";
-import { useNavigate } from "react-router-dom";
+import { useNavigate, useSearchParams } from "react-router-dom";
 import { ArrowLeft, ArrowRight, Check, Clock, Film, VideoIc, X } from "../components/Icons";
 import {
   approveLaunchframePlan,
@@ -91,27 +91,62 @@ function profileReason(profile: LaunchframeProfile | undefined): string | null {
   return profile?.reasons?.[0] ?? null;
 }
 
+const MOCK_WORKFLOW: LaunchframeWorkflow = {
+  id: "mock-launchframe",
+  url: "https://field.example/spring",
+  status: "draft",
+  progress: 0,
+  usedFixture: true,
+  plan: {
+    videoType: "A",
+    title: "Spring launch · first cut",
+    hook: "A quiet product reveal that lets material and light do the selling.",
+    beats: [
+      { type: "capture", text: "Open on the product page with a warm, slow arrival.", duration: 2, requiresAI: false },
+      { type: "generate", text: "Reveal the bottle with a restrained editorial camera move.", duration: 3, requiresAI: true },
+      { type: "capture", text: "Show the product detail and the spring collection line.", duration: 3, requiresAI: false },
+      { type: "generate", text: "End on the mark with the last light of day.", duration: 2, requiresAI: true },
+    ],
+    apiChoices: [
+      { id: "mock-seedance", model: "Kling 3.0", endpoint: "kling-video/v3.0/std/text-to-video", purpose: "Editorial b-roll", estimatedSeconds: 18, estimatedCost: 0.21 },
+    ],
+    estimatedCost: 0.48,
+    maxBudget: 2,
+    inputs: { url: "https://field.example/spring" },
+    consent: true,
+  },
+  layers: [
+    { id: "mock-layer-1", kind: "ui", label: "Product page capture", duration: 2, order: 0, source: "https://field.example/spring" },
+    { id: "mock-layer-2", kind: "higgsfield", label: "Warm bottle reveal", duration: 3, order: 1, source: "Kling 3.0" },
+    { id: "mock-layer-3", kind: "text", label: "Spring, in a quieter light.", duration: 2, order: 2, text: "Spring, in a quieter light." },
+    { id: "mock-layer-4", kind: "ui", label: "Collection end card", duration: 2, order: 3, source: "Product page" },
+  ],
+  transcript: [{ step: "done", detail: "Plan prepared for approval." }],
+  profile: { category: "Product launch", videoType: "A", reasons: ["The product benefits from a concise, visual reveal."], palette: ["#e9d4b9", "#1e2722"] },
+};
 export default function Launchframe() {
   const navigate = useNavigate();
-  const [stage, setStage] = useState<Stage>("brief");
-  const [url, setUrl] = useState("");
+  const [searchParams] = useSearchParams();
+  const mockup = searchParams.get("mockup") === "1";
+  const [stage, setStage] = useState<Stage>(() => mockup ? "plan" : "brief");
+  const [url, setUrl] = useState(() => mockup ? MOCK_WORKFLOW.url : "");
   const [videoType, setVideoType] = useState<LaunchframeVideoType>("A");
-  const [instruction, setInstruction] = useState("");
+  const [instruction, setInstruction] = useState(() => mockup ? "A restrained product launch. Show material, light, and the final mark without sounding like an ad." : "");
   const [budget, setBudget] = useState("2");
   const [founderVideo, setFounderVideo] = useState<File>();
   const [founderVoice, setFounderVoice] = useState<File>();
   const [logo, setLogo] = useState<File>();
-  const [consent, setConsent] = useState(false);
-  const [workflow, setWorkflow] = useState<LaunchframeWorkflow | null>(null);
-  const [draftLayers, setDraftLayers] = useState<LaunchframeLayer[]>([]);
+  const [consent, setConsent] = useState(mockup);
+  const [workflow, setWorkflow] = useState<LaunchframeWorkflow | null>(() => mockup ? MOCK_WORKFLOW : null);
+  const [draftLayers, setDraftLayers] = useState<LaunchframeLayer[]>(() => mockup ? MOCK_WORKFLOW.layers : []);
   const [removedLayerIds, setRemovedLayerIds] = useState<string[]>([]);
-  const [assistant, setAssistant] = useState<LaunchframeChatMessage[]>([INITIAL_ASSISTANT]);
+  const [assistant, setAssistant] = useState<LaunchframeChatMessage[]>(() => mockup ? [INITIAL_ASSISTANT, { role: "user", content: "Which format fits this product?" }, { role: "assistant", content: "Flash demo fits: it keeps the reveal visual, concise, and easy to approve." }] : [INITIAL_ASSISTANT]);
   const [assistantInput, setAssistantInput] = useState("");
   const [busy, setBusy] = useState(false);
   const [assistantBusy, setAssistantBusy] = useState(false);
   const [exporting, setExporting] = useState(false);
   const [error, setError] = useState("");
-  const [apiState, setApiState] = useState<ApiState>("unknown");
+  const [apiState, setApiState] = useState<ApiState>(mockup ? "online" : "unknown");
   const reportedStatus = useRef<string>("");
   const assistantEnd = useRef<HTMLDivElement | null>(null);
 

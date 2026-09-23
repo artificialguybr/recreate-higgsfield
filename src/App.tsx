@@ -9,6 +9,11 @@ import Editor from "./pages/Editor";
 import Launchframe from "./pages/Launchframe";
 import Workspace from "./pages/Workspace";
 import Assets from "./pages/Assets";
+import CreateMockup from "./pages/mockups/CreateMockup";
+import WorkspaceMockup from "./pages/mockups/WorkspaceMockup";
+import EditorMockup from "./pages/mockups/EditorMockup";
+import ChatMockup from "./pages/mockups/ChatMockup";
+import LaunchframeMockup from "./pages/mockups/LaunchframeMockup";
 
 export default function App() {
   return (
@@ -31,6 +36,11 @@ export default function App() {
           <Route path="/launch" element={<Launchframe />} />
           <Route path="/launchframe" element={<Launchframe />} />
           <Route path="/workspace" element={<Workspace />} />
+          <Route path="/create-mockup" element={<CreateMockup />} />
+          <Route path="/workspace-mockup" element={<WorkspaceMockup />} />
+          <Route path="/editor-mockup" element={<EditorMockup />} />
+          <Route path="/chat-mockup" element={<ChatMockup />} />
+          <Route path="/launchframe-mockup" element={<LaunchframeMockup />} />
         </Routes>
       </main>
     </div>

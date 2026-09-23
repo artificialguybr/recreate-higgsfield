@@ -9,6 +9,7 @@ export default defineConfig(({ mode }) => {
   const env = loadEnv(mode, process.cwd(), "");
   const launchframeTarget = env.LAUNCHFRAME_URL || "http://localhost:3000";
   const hasHiggsfieldCredentials = Boolean(env.HF_API_KEY_ID && env.HF_API_KEY_SECRET);
+  const hasPexelsCredentials = Boolean(env.PEXELS_API_KEY);
   const higgsfieldApi: ProxyOptions = {
     target: "https://api.higgsfield.ai",
     changeOrigin: true,
@@ -43,13 +44,24 @@ export default defineConfig(({ mode }) => {
       secure: true,
       rewrite: (path: string) => path.replace(/^\/hfblob/, ""),
     },
-  };
-
+    "/pexels": {
+      target: "https://api.pexels.com",
+      changeOrigin: true,
+      secure: true,
+      configure(proxy) {
+        proxy.on("proxyReq", (request) => {
+          request.removeHeader("Authorization");
+          if (hasPexelsCredentials) request.setHeader("Authorization", env.PEXELS_API_KEY);
+        });
+      },
+      rewrite: (path) => path.replace(/^\/pexels/, ""),
+    },
+   };
   return {
     plugins: [react()],
     define: {
-      // A boolean capability flag is safe to expose; the key values never are.
       "import.meta.env.VITE_HF_CONFIGURED": JSON.stringify(hasHiggsfieldCredentials),
+      "import.meta.env.VITE_STOCK_CONFIGURED": JSON.stringify(hasPexelsCredentials),
     },
     optimizeDeps: {
       // The ffmpeg library loads sibling worker.js via new URL(...); Vite's dep

@@ -1,0 +1,16 @@
+.mockup-workspace-shell {
+  width: 100%;
+  min-width: 0;
+  min-height: calc(100vh - 72px);
+  flex: 1 1 auto;
+}
+.mockup-workspace-shell .workspace-page,
+.mockup-workspace-shell .workspace-flow {
+  min-height: 760px;
+}
+
+@media (max-width: 768px) {
+  .mockup-workspace-shell .workspace-flow {
+    min-height: 648px;
+  }
+}

@@ -13,6 +13,22 @@ const savedTheme = requestedTheme && validThemes.has(requestedTheme)
   : storedTheme;
 
 document.documentElement.dataset.theme = savedTheme && validThemes.has(savedTheme) ? savedTheme : "light";
+const mockupRestoreKey = "field-mockup-restore";
+if (!window.location.pathname.endsWith("-mockup")) {
+  const serialized = sessionStorage.getItem(mockupRestoreKey);
+  if (serialized) {
+    try {
+      const snapshot = JSON.parse(serialized) as Record<string, string | null>;
+      Object.entries(snapshot).forEach(([key, value]) => {
+        if (value === null) localStorage.removeItem(key);
+        else localStorage.setItem(key, value);
+      });
+    } catch {
+      // Ignore a malformed disposable mockup snapshot.
+    }
+    sessionStorage.removeItem(mockupRestoreKey);
+  }
+}
 
 createRoot(document.getElementById("root")!).render(
   <React.StrictMode>

@@ -1,4 +1,4 @@
-export type WorkspaceTool = "brief" | "chat" | "launch" | "studio" | "editor" | "export" | "gallery" | "image" | "video" | "audio" | "3d" | "motion-control" | "motion-transfer";
+export type WorkspaceTool = "brief" | "chat" | "launch" | "studio" | "editor" | "export" | "gallery" | "image" | "video" | "audio" | "3d" | "motion-control" | "motion-transfer" | "stock";
 export type WorkspaceStatus = "ready" | "active" | "draft" | "empty" | "failed";
 export type WorkspacePositions = Record<string, { x: number; y: number }>;
 export type WorkspaceConnection = { id: string; source: string; target: string; sourceHandle?: string; targetHandle?: string };
@@ -16,7 +16,7 @@ export interface WorkspaceArtifact {
   model?: string;
   outputUrl?: string;
   outputKind?: "image" | "video" | "audio" | "3d";
-  outputSource?: "generation" | "catalog" | "render";
+  outputSource?: "catalog" | "generation" | "render";
   assetId?: string;
   resolution?: "480p" | "720p";
   parameters?: Record<string, string | number | boolean>;
@@ -47,8 +47,7 @@ const DEFAULT_ARTIFACTS: WorkspaceArtifact[] = [
   { id: "launch", tool: "launch", title: "Launchframe", summary: "Turn a product URL into an approved launch video.", route: "/launch", status: "empty", updatedAt: "" },
   { id: "image", tool: "image", title: "Image", summary: "Generate or refine a still.", route: "/image", status: "draft", updatedAt: "" },
   { id: "video", tool: "video", title: "Video", summary: "Generate a moving shot.", route: "/video", status: "draft", updatedAt: "" },
-  { id: "studio", tool: "studio", title: "Studio", summary: "Shape scenes, assets, and cinematic structure.", route: "/studio", status: "empty", updatedAt: "" },
-  { id: "editor", tool: "editor", title: "Editor", summary: "Cut, retime, caption, and export the final cut.", route: "/editor", status: "empty", updatedAt: "" },
+  { id: "stock", tool: "stock", title: "Stock footage", summary: "Find free Pexels footage for b-roll.", route: "/video", status: "empty", updatedAt: "" },
 ];
 
 function cloneDefaults(): WorkspaceArtifact[] {
