@@ -775,6 +775,8 @@ a { color: inherit; text-decoration: none; }
   background: rgba(255, 255, 255, 0.018);
 }
 .schema-fields { display: contents; }
+.reference-url-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; grid-column: 1 / -1; }
+.reference-error { color: #c75043; font-size: 11px; line-height: 1.35; }
 .option-step > button {
   display: inline-flex; align-items: center; justify-content: space-between; gap: 8px;
   color: var(--text); background: var(--bg); border: 1px solid var(--line-soft);
@@ -1952,3 +1954,4 @@ a { color: inherit; text-decoration: none; }
   .ed-chat-pane .timeline-agent { height: 100%; padding: 8px; }
   .gen-panel .gen-model-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
 }
+@media (max-width: 768px) { .reference-url-grid { grid-template-columns: 1fr; } }

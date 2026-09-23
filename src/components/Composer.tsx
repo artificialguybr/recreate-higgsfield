@@ -5,7 +5,7 @@ import { setPending } from "../lib/transfer";
 import { upsertWorkspaceArtifact } from "../lib/workspace";
 import { saveAsset } from "../lib/assets";
 import { hasKeys, generate, fetchFeed, VIDEO_MODE, type GenResult, type FeedModel } from "../lib/hf";
-import { MARKETING_IMAGE_MODE } from "../lib/workflowPorts";
+import { MARKETING_IMAGE_MODE, MOTION_CONTROL_MODE } from "../lib/workflowPorts";
 import { bodyForModel, isSupportedModel, modelSchema, type ModelField } from "../lib/hfModels";
 
 export type Mode = "Image" | "Video" | "Audio" | "3D";
@@ -83,6 +83,14 @@ function ratioStyle(ratio: string): React.CSSProperties | undefined {
 function labelForModel(item: FeedModel | undefined, fallback: string) {
   return item?.title || fallback;
 }
+function publicUrls(value: string) {
+  return value.split(/\r?\n|,/).map((item) => item.trim()).filter(Boolean);
+}
+
+function invalidPublicUrl(value: string) {
+  return publicUrls(value).some((item) => !/^https:\/\//i.test(item));
+}
+
 
 export default function Composer({
   model = "Field 1",
@@ -118,6 +126,9 @@ export default function Composer({
   const [schemaParams, setSchemaParams] = useState<Record<string, string | number | boolean>>({});
   const [videoRef, setVideoRef] = useState("");
   const [videoElements, setVideoElements] = useState("");
+  const [imageRefUrls, setImageRefUrls] = useState("");
+  const [videoRefUrl, setVideoRefUrl] = useState("");
+  const [videoElementUrl, setVideoElementUrl] = useState("");
   const [audioFile, setAudioFile] = useState("");
   const [voiceDetails, setVoiceDetails] = useState("");
   const [audioScript, setAudioScript] = useState("");
@@ -187,6 +198,15 @@ export default function Composer({
   const activeSchema = mode === "Image" || mode === "Video" ? modelSchema({ mode: selectedModeId, type: mode.toLowerCase() as "image" | "video" }) : null;
   const schemaFields = (activeSchema?.fields ?? []).filter((field) => !["aspect_ratio", "duration", "resolution", "sound", "quality", "enhance_prompt", "generate_audio"].includes(field.key));
   const renderSchemaFields = (fields: ModelField[]) => fields.length === 0 ? null : <div className="schema-fields">{fields.map((field) => <label className="option-group" key={field.key}><span className="option-label">{field.label}</span>{field.type === "select" ? <select className="option-select" value={String(schemaParams[field.key] ?? field.default)} onChange={(event) => setSchemaParams((current) => ({ ...current, [field.key]: event.target.value }))}>{(field.options ?? []).map((option) => <option key={option}>{option}</option>)}</select> : field.type === "boolean" ? <input type="checkbox" checked={schemaParams[field.key] === true} onChange={(event) => setSchemaParams((current) => ({ ...current, [field.key]: event.target.checked }))} /> : <input className="option-select" type="number" min={field.min} max={field.max} step={field.step} value={String(schemaParams[field.key] ?? field.default)} onChange={(event) => setSchemaParams((current) => ({ ...current, [field.key]: Number(event.target.value) }))} />}</label>)}</div>;
+  const imageReferenceUrls = publicUrls(imageRefUrls);
+  const motionImageUrls = publicUrls(videoElementUrl);
+  const referenceError = invalidPublicUrl(imageRefUrls)
+    ? "Reference images must use public HTTPS URLs."
+    : mode === "Video" && videoTab === "motion" && (!videoRefUrl.trim() || !videoElementUrl.trim())
+      ? "Motion control needs one public motion video URL and one character image URL."
+      : mode === "Video" && videoTab === "motion" && (invalidPublicUrl(videoRefUrl) || invalidPublicUrl(videoElementUrl))
+        ? "Motion references must use public HTTPS URLs."
+        : "";
 
   const demoResult = async (p: string, m: Mode): Promise<GenResult> => {
     const pool = demoPool ?? (await fetchFeed(1, 24).then((r) => { setDemoPool(r); return r; }).catch(() => null));
@@ -201,20 +221,24 @@ export default function Composer({
     { mode: selectedModeId || MARKETING_IMAGE_MODE, type: "image" },
     p,
     { ...schemaParams, aspect_ratio: imageOpts.ratio, resolution: imageOpts.resolution, quality: imageOpts.quality, enhance_prompt: imageOpts.enhance },
+    { imageUrls: imageReferenceUrls },
   );
 
-  const videoPayload = (p: string): Record<string, unknown> => bodyForModel(
-    { mode: selectedModeId || VIDEO_MODE, type: "video" },
-    p,
-    {
-      ...schemaParams,
-      duration: Number(videoOpts.duration.replace("s", "")) || 5,
-      aspect_ratio: videoOpts.ratio,
-      resolution: videoOpts.resolution,
-      sound: videoOpts.sound,
-      generate_audio: schemaParams.generate_audio ?? videoOpts.sound === "on",
-    },
-  );
+  const videoPayload = (p: string): Record<string, unknown> => videoTab === "motion"
+    ? { prompt: p, image_url: motionImageUrls[0], video_url: videoRefUrl.trim(), keep_original_sound: videoOpts.sound === "on" ? "yes" : "no", character_orientation: "video" }
+    : bodyForModel(
+      { mode: selectedModeId || VIDEO_MODE, type: "video" },
+      p,
+      {
+        ...schemaParams,
+        duration: Number(videoOpts.duration.replace("s", "")) || 5,
+        aspect_ratio: videoOpts.ratio,
+        resolution: videoOpts.resolution,
+        sound: videoOpts.sound,
+        generate_audio: schemaParams.generate_audio ?? videoOpts.sound === "on",
+      },
+      { imageUrls: publicUrls(videoElementUrl), videoUrl: videoRefUrl.trim() || undefined },
+    );
   const syncWorkspaceAsset = (p: string, phase: "active" | "ready" | "failed", output?: GenResult, error = "", assetId?: string) => {
     if (mode !== "Image" && mode !== "Video") return;
     const tool = mode.toLowerCase() as "image" | "video";
@@ -227,7 +251,7 @@ export default function Composer({
       route: `/${tool}`,
       status: phase,
       prompt: p,
-      model: selectedModeId,
+      model: mode === "Video" && videoTab === "motion" ? MOTION_CONTROL_MODE : selectedModeId,
       ...(phase === "ready" ? {
         outputUrl: hasMedia ? output?.url : undefined,
         outputKind: hasMedia ? tool : undefined,
@@ -241,6 +265,11 @@ export default function Composer({
     setSaveError("");
     const p = (mode === "Audio" && audioTab === "tts" && audioScript.trim() ? audioScript : prompt).trim();
     if (!p || busy.current) return;
+    if (referenceError) {
+      setError(referenceError);
+      setPhase("error");
+      return;
+    }
     busy.current = true;
     setError("");
     setResult(null);
@@ -256,7 +285,7 @@ export default function Composer({
       return;
     }
     try {
-      const endpoint = mode === "Image" ? selectedModeId || MARKETING_IMAGE_MODE : selectedModeId || VIDEO_MODE;
+      const endpoint = mode === "Image" ? selectedModeId || MARKETING_IMAGE_MODE : videoTab === "motion" ? MOTION_CONTROL_MODE : selectedModeId || VIDEO_MODE;
       const body = mode === "Image" ? imagePayload(p) : videoPayload(p);
       const r = await generate(endpoint, body, (s) => setStatus(s));
       setResult(r);
@@ -313,6 +342,7 @@ export default function Composer({
         <div className="advanced-panel">
           {imageQualities.length > 0 && <div className="option-group"><span className="option-label">Quality</span><div className="option-seg">{imageQualities.map((value) => <button key={value} className={imageOpts.quality === value ? "on" : ""} onClick={() => setImageOpts((o) => ({ ...o, quality: value }))}>{value}</button>)}</div></div>}
           {selectedModeId === MARKETING_IMAGE_MODE && <div className="option-group"><span className="option-label">Enhance prompt</span><div className="option-seg"><button className={!imageOpts.enhance ? "on" : ""} onClick={() => setImageOpts((o) => ({ ...o, enhance: false }))}>Off</button><button className={imageOpts.enhance ? "on" : ""} onClick={() => setImageOpts((o) => ({ ...o, enhance: true }))}>On</button></div></div>}
+          <label className="text-panel compact"><span className="option-label">Reference image URLs <em>Optional · public HTTPS</em></span><textarea rows={2} value={imageRefUrls} onChange={(event) => setImageRefUrls(event.target.value)} placeholder="One public image URL per line…" /></label>
         </div>
       )}
     </div>
@@ -321,7 +351,7 @@ export default function Composer({
   const renderVideoControls = () => (
     <div className="create-options video-options">
       <div className="create-tabs">
-        {([["create", "Create video"], ["edit", "Edit video"], ["motion", "Motion control"]] as [VideoTab, string][]).map(([id, label]) => <button key={id} className={videoTab === id ? "on" : ""} onClick={() => setVideoTab(id)}>{label}</button>)}
+        {([["create", "Create video"], ["edit", "Edit video"], ["motion", "Motion control"]] as [VideoTab, string][]).map(([id, label]) => <button key={id} className={videoTab === id ? "on" : ""} onClick={() => { setVideoTab(id); if (id === "motion") { setSelectedModeId(MOTION_CONTROL_MODE); setSelectedModelName("Kling Motion Control"); } else if (id === "create" || selectedModeId === MOTION_CONTROL_MODE) { setSelectedModeId(VIDEO_MODE); setSelectedModelName("Kling 3.0"); } }}>{label}</button>)}
       </div>
       <div className="asset-grid">
         {videoTab === "create" && <>
@@ -337,6 +367,10 @@ export default function Composer({
           <label className="asset-slot"><input type="file" accept="image/*" onChange={pickFile(setVideoElements)} /><ImageIc size={18} /><strong>{videoElements || "Add your character"}</strong><span>Visible face or body</span></label>
         </>}
       </div>
+      {videoTab === "motion" && <div className="reference-url-grid">
+        <label className="text-panel compact"><span className="option-label">Motion video URL <em>Public HTTPS</em></span><input type="url" value={videoRefUrl} onChange={(event) => setVideoRefUrl(event.target.value)} placeholder="https://…" /></label>
+        <label className="text-panel compact"><span className="option-label">Character image URL <em>Public HTTPS</em></span><input type="url" value={videoElementUrl} onChange={(event) => setVideoElementUrl(event.target.value)} placeholder="https://…" /></label>
+      </div>}
       <div className="video-basic">
         <label className="option-group">
           <span className="option-label"><Ratio size={12} aria-hidden="true" /> Aspect ratio</span>
@@ -396,10 +430,11 @@ export default function Composer({
           <div className="prompt-dock">
             <span className="prompt-add" aria-hidden="true">＋</span>
             <textarea className="device-input" value={prompt} placeholder={mode === "Audio" ? "Write what you want to hear…" : placeholder} onChange={(e) => changePrompt(e.target.value)} onKeyDown={(e) => { if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); void generateWork(); } }} />
-            <button className="send prompt-send" onClick={() => void generateWork()} disabled={phase === "working" || !(mode === "Audio" && audioTab === "tts" ? audioScript.trim() || prompt.trim() : prompt.trim())} aria-label="Generate">{phase === "working" ? <span className="ring" /> : <><span className="send-label">Generate</span><ArrowUp size={14} /></>}</button>
+            <button className="send prompt-send" onClick={() => void generateWork()} disabled={phase === "working" || Boolean(referenceError) || !(mode === "Audio" && audioTab === "tts" ? audioScript.trim() || prompt.trim() : prompt.trim())} aria-label="Generate">{phase === "working" ? <span className="ring" /> : <><span className="send-label">Generate</span><ArrowUp size={14} /></>}</button>
           </div>
           <div className={`settings-dock settings-${mode.toLowerCase()}`}>
             {controls}
+            {referenceError && <span className="reference-error" role="alert">{referenceError}</span>}
             <div className="device-bar">
               <label className="model-picker"><span>Model</span><select value={selectedModeId} onChange={(e) => { const value = e.target.value; const item = models.find((x) => x.mode === value); setSelectedModeId(value); setSelectedModelName(labelForModel(item, e.target.options[e.target.selectedIndex]?.text ?? DEFAULT_MODELS[mode])); if (mode === "Image") setImageOpts((o) => ({ ...o, resolution: value.toLowerCase().includes("soul") ? "1080p" : "2k" })); }}><option value={selectedModeId}>{selectedModelName}</option>{models.filter((x) => x.mode !== selectedModeId).map((x) => <option key={x.mode} value={x.mode}>{x.title}</option>)}</select></label>
             </div>
