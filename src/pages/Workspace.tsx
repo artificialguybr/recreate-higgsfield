@@ -54,7 +54,7 @@ interface NodeData extends WorkspaceArtifact, Record<string, unknown> {
   onOpenGallery?: () => void;
   onPatch?: (id: string, patch: Partial<WorkspaceArtifact>) => void;
   onGenerate?: (id: string) => void;
-  onSendEditor?: (url: string, kind: "image" | "video") => void;
+  onSendEditor?: (url: string, kind: "image" | "video" | "audio", assetId?: string) => void;
   onDetails?: (id: string) => void;
   inputs?: ConnectedInput[];
   busy?: boolean;
@@ -257,7 +257,7 @@ function ArtifactDetailsModal({ artifact, onClose, onSave, onSendEditor, saving,
   artifact: WorkspaceArtifact & { inputs: ConnectedInput[]; assetSaveError?: string };
   onClose: () => void;
   onSave: (artifact: WorkspaceArtifact) => void;
-  onSendEditor: (url: string, kind: "image" | "video") => void;
+  onSendEditor: (url: string, kind: "image" | "video" | "audio", assetId?: string) => void;
   saving: boolean;
   error: string;
 }) {
@@ -297,7 +297,7 @@ function WorkspaceGalleryModal({ assets, outputs, onClose, onUse, onSendEditor, 
   outputs: WorkspaceArtifact[];
   onClose: () => void;
   onUse: (asset: LocalAsset) => void;
-  onSendEditor: (url: string, kind: "image" | "video") => void;
+  onSendEditor: (url: string, kind: "image" | "video" | "audio", assetId?: string) => void;
   onSaveOutput: (artifact: WorkspaceArtifact) => void;
   savingId: string;
   error: string;
@@ -319,17 +319,17 @@ function WorkspaceGalleryModal({ assets, outputs, onClose, onUse, onSendEditor, 
         <div style={{ display: "grid", placeItems: "center", minWidth: 0, background: "var(--bg)", borderRadius: 10, padding: 12 }}>{preview(details)}</div>
         <div style={{ display: "flex", flexDirection: "column", gap: 14 }}>
           <dl className="workflow-modal-info"><div><dt>Type</dt><dd>{details.kind}</dd></div><div><dt>Source</dt><dd>{details.source}</dd></div><div><dt>Size</dt><dd>{formatAssetSize(details.size)}</dd></div>{details.model && <div><dt>Model</dt><dd>{details.model}</dd></div>}{details.prompt && <div className="workflow-modal-prompt"><dt>Prompt</dt><dd>{details.prompt}</dd></div>}</dl>
-          <div className="workflow-modal-actions" style={{ padding: 0, borderTop: 0, justifyContent: "flex-start", flexWrap: "wrap" }}><button onClick={() => onUse(details)}>Use in Workspace</button><button onClick={() => onSendEditor(assetObjectUrl(details), details.kind)}>Send to Editor</button><button onClick={() => setDetailsId("")}>Back to gallery</button></div>
+          <div className="workflow-modal-actions" style={{ padding: 0, borderTop: 0, justifyContent: "flex-start", flexWrap: "wrap" }}><button onClick={() => onUse(details)}>Use in Workspace</button><button onClick={() => onSendEditor(assetObjectUrl(details), details.kind, details.id)}>Send to Editor</button><button onClick={() => setDetailsId("")}>Back to gallery</button></div>
         </div>
       </div> : <div className="workflow-modal-body" style={{ display: "block" }}>
         {error && <p className="workflow-modal-error" role="alert" style={{ padding: "0 0 12px" }}>{error}</p>}
         {outputs.length > 0 && <section aria-label="Workspace outputs" style={{ marginBottom: 22 }}><span className="workflow-modal-kicker">Workspace outputs</span><div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(180px, 1fr))", gap: 12, marginTop: 10 }}>{outputs.map((artifact) => <article key={artifact.id} style={{ minWidth: 0, border: "1px solid var(--line)", borderRadius: 10, overflow: "hidden", background: "var(--bg)" }}>
-          <div style={{ aspectRatio: "16 / 10", background: "#090a0b" }}>{artifact.outputKind === "video" ? <video src={artifact.outputUrl} muted playsInline controls preload="metadata" style={{ width: "100%", height: "100%", objectFit: "cover" }} /> : <img src={artifact.outputUrl} alt={artifact.title} style={{ width: "100%", height: "100%", objectFit: "cover" }} />}</div>
+          <div style={{ aspectRatio: "16 / 10", background: "#090a0b" }}>{artifact.outputKind === "video" ? <video src={artifact.outputUrl} muted playsInline controls preload="metadata" style={{ width: "100%", height: "100%", objectFit: "cover" }} /> : artifact.outputKind === "audio" ? <audio src={artifact.outputUrl} controls preload="metadata" style={{ width: "100%" }} /> : <img src={artifact.outputUrl} alt={artifact.title} style={{ width: "100%", height: "100%", objectFit: "cover" }} />}</div>
           <div style={{ display: "grid", gap: 8, padding: 10 }}><strong style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{artifact.title}</strong><small style={{ color: "var(--text-3)" }}>{artifact.outputKind} · Not saved to library</small><button type="button" onClick={() => onSaveOutput(artifact)} disabled={savingId === artifact.id}>{savingId === artifact.id ? "Saving…" : "Save to gallery"}</button></div>
         </article>)}</div></section>}
         <section aria-label="Saved workspace assets"><span className="workflow-modal-kicker">Saved assets</span>{assets.length === 0 ? <p className="workflow-modal-empty" style={{ minHeight: 140, marginTop: 10 }}>Your local gallery is empty.</p> : <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(180px, 1fr))", gap: 12, marginTop: 10 }}>{assets.map((asset) => <article key={asset.id} style={{ minWidth: 0, border: "1px solid var(--line)", borderRadius: 10, overflow: "hidden", background: "var(--bg)" }}>
-          <div style={{ aspectRatio: "16 / 10", background: "#090a0b" }}>{asset.kind === "video" ? <video src={assetObjectUrl(asset)} muted playsInline controls preload="metadata" aria-label={asset.name} style={{ width: "100%", height: "100%", objectFit: "cover" }} /> : <img src={assetObjectUrl(asset)} alt={asset.name} loading="lazy" style={{ width: "100%", height: "100%", objectFit: "cover" }} />}</div>
-          <div style={{ display: "grid", gap: 8, padding: 10 }}><strong style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }} title={asset.name}>{asset.name}</strong><small style={{ color: "var(--text-3)" }}>{asset.kind} · {asset.source} · {formatAssetSize(asset.size)}</small><div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}><button type="button" onClick={() => onUse(asset)}>Use in Workspace</button><button type="button" onClick={() => setDetailsId(asset.id)}>Open details</button>{(asset.kind === "image" || asset.kind === "video") && <button type="button" onClick={() => onSendEditor(assetObjectUrl(asset), asset.kind)}>Send to Editor</button>}</div></div>
+          <div style={{ aspectRatio: "16 / 10", background: "#090a0b" }}>{asset.kind === "video" ? <video src={assetObjectUrl(asset)} muted playsInline controls preload="metadata" aria-label={asset.name} style={{ width: "100%", height: "100%", objectFit: "cover" }} /> : asset.kind === "audio" ? <audio src={assetObjectUrl(asset)} controls preload="metadata" aria-label={asset.name} style={{ width: "100%" }} /> : <img src={assetObjectUrl(asset)} alt={asset.name} loading="lazy" style={{ width: "100%", height: "100%", objectFit: "cover" }} />}</div>
+          <div style={{ display: "grid", gap: 8, padding: 10 }}><strong style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }} title={asset.name}>{asset.name}</strong><small style={{ color: "var(--text-3)" }}>{asset.kind} · {asset.source} · {formatAssetSize(asset.size)}</small><div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}><button type="button" onClick={() => onUse(asset)}>Use in Workspace</button><button type="button" onClick={() => setDetailsId(asset.id)}>Open details</button>{(asset.kind === "image" || asset.kind === "video" || asset.kind === "audio") && <button type="button" onClick={() => onSendEditor(assetObjectUrl(asset), asset.kind, asset.id)}>Send to Editor</button>}</div></div>
         </article>)}</div>}</section>
       </div>}
       {!details && <footer className="workflow-modal-actions"><button onClick={() => onClose()}>Done</button></footer>}
@@ -498,8 +498,8 @@ export default function Workspace() {
     saveWorkspaceArtifacts(next);
   }, []);
 
-  const sendToEditor = useCallback((url: string, kind: "image" | "video") => {
-    setPending(url, kind);
+  const sendToEditor = useCallback((url: string, kind: "image" | "video" | "audio", assetId?: string) => {
+    setPending(url, kind, assetId);
     navigate("/editor");
   }, [navigate]);
 

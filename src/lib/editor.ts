@@ -3,16 +3,17 @@
 
 export type Clip = {
   id: string;
-  kind: "image" | "video";
+  kind: "image" | "video" | "audio";
   src: string;
+  assetId?: string; // IndexedDB asset used to restore local object URLs
   name: string;
-  dur: number; // total source duration (video) — images: 0
+  dur: number; // total source duration (video/audio) — images: 0
   in: number; // trim start (seconds into source)
   out: number; // trim end
   thumb?: string; // canvas-captured frame for the timeline
   // per-clip look — previewed live, baked at export
   speed?: number; // 0.5–2 (video)
-  volume?: number; // 0–2 (video)
+  volume?: number; // 0–2 (video/audio)
   mirror?: boolean;
   fade?: boolean; // 0.25s in/out
   fit?: "contain" | "cover";
@@ -46,6 +47,10 @@ export function makeVideoClip(src: string, name: string, dur: number): Clip {
 
 export function makeImageClip(src: string, name: string): Clip {
   return { id: crypto.randomUUID(), kind: "image", src, name, dur: 0, in: 0, out: IMG_SECONDS };
+}
+
+export function makeAudioClip(src: string, name: string, dur: number): Clip {
+  return { id: crypto.randomUUID(), kind: "audio", src, name, dur, in: 0, out: Math.max(0.1, dur) };
 }
 
 // Split a clip at `pos` (seconds into the clip). Returns [left, right] or null.

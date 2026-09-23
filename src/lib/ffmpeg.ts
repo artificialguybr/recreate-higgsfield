@@ -98,7 +98,7 @@ export async function exportClips(
     await ff.writeFile(input, await fetchFile(blob));
     const output = `segment${base}.mp4`;
 
-    const sp = c.kind === "video" ? c.speed ?? 1 : 1;
+    const sp = c.kind !== "image" ? c.speed ?? 1 : 1;
     const len = Math.max(0.1, clipLen(c) / sp);
     const cover = c.fit === "cover";
 
@@ -114,10 +114,11 @@ export async function exportClips(
     }
     vf.push(`fps=${FPS}`, "format=yuv420p");
 
-    // Does the source carry audio? Decides whether audio filters apply.
+    // Keep one audio stream on every segment so concat has a stable layout.
     const probe = await withLog(ff, ["-i", input]);
-    const audio = probe.log.some((l) => l.includes("Audio:"));
-
+    const sourceAudio = probe.log.some((l) => l.includes("Audio:"));
+    const audio = c.kind === "audio" || sourceAudio;
+    const audioInput = c.kind === "audio" ? "1:a" : sourceAudio ? "0:a" : "1:a";
     const af: string[] = [];
     if (audio) {
       if (sp !== 1) af.push(`atempo=${sp}`);
@@ -130,28 +131,33 @@ export async function exportClips(
 
     const cap = c.caption?.trim();
     const args: string[] = ["-y"];
-    if (c.kind === "image") args.push("-loop", "1", "-t", len.toFixed(3));
-    else {
-      args.push("-ss", c.in.toFixed(3), "-to", c.out.toFixed(3));
+    if (c.kind === "audio") {
+      args.push("-f", "lavfi", "-i", `color=c=black:s=${W}x${H}:r=${FPS}:d=${len.toFixed(3)}`);
+      args.push("-ss", c.in.toFixed(3), "-to", c.out.toFixed(3), "-i", input);
+    } else {
+      if (c.kind === "image") args.push("-loop", "1", "-t", len.toFixed(3));
+      else args.push("-ss", c.in.toFixed(3), "-to", c.out.toFixed(3));
+      args.push("-i", input);
     }
-    args.push("-i", input);
+    if (!sourceAudio && c.kind !== "audio") {
+      args.push("-f", "lavfi", "-t", len.toFixed(3), "-i", "anullsrc=channel_layout=stereo:sample_rate=44100");
+    }
     if (cap) {
       const capFile = `cap${base}.png`;
       await ff.writeFile(capFile, await fetchFile(await captionPng(cap, W, H)));
       args.push("-loop", "1", "-i", capFile);
       args.push(
         "-filter_complex",
-        `[0:v]${vf.join(",")}[v];[v][1:v]overlay=0:0:shortest=1[outv]`,
+        `[0:v]${vf.join(",")}[v];[v][${c.kind === "audio" || !sourceAudio ? 2 : 1}:v]overlay=0:0:shortest=1[outv]`,
         "-map", "[outv]"
       );
-      if (audio) args.push("-map", "0:a");
-      args.push("-shortest");
     } else {
-      args.push("-vf", vf.join(","));
+      args.push("-vf", vf.join(","), "-map", "0:v");
     }
-    args.push("-c:v", "libx264", "-preset", "veryfast", "-crf", "23");
-    if (audio && af.length) args.push("-af", af.join(","));
-    else args.push("-an");
+    args.push("-map", audioInput);
+    args.push("-t", len.toFixed(3), "-c:v", "libx264", "-preset", "veryfast", "-crf", "23");
+    if (af.length) args.push("-af", af.join(","));
+    args.push("-c:a", "aac", "-ar", "44100", "-ac", "2", "-shortest");
     args.push("-movflags", "+faststart", output);
 
     const code = await ff.exec(args);

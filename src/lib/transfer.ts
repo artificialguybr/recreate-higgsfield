@@ -2,16 +2,16 @@
 
 const KEY = "field-pending";
 
-export function setPending(url: string, kind: "image" | "video" = "video") {
-  sessionStorage.setItem(KEY, JSON.stringify({ url, kind }));
+export function setPending(url: string, kind: "image" | "video" | "audio" = "video", assetId?: string) {
+  sessionStorage.setItem(KEY, JSON.stringify({ url, kind, assetId }));
 }
 
-export function pendingMedia(): { url: string; kind: "image" | "video" } | null {
+export function pendingMedia(): { url: string; kind: "image" | "video" | "audio"; assetId?: string } | null {
   try {
     const raw = sessionStorage.getItem(KEY);
     if (!raw) return null;
-    const p = JSON.parse(raw) as { url?: string; kind?: "image" | "video" };
-    return p.url ? { url: p.url, kind: p.kind === "image" ? "image" : "video" } : null;
+    const p = JSON.parse(raw) as { url?: string; kind?: "image" | "video" | "audio"; assetId?: string };
+    return p.url ? { url: p.url, kind: p.kind === "image" || p.kind === "audio" ? p.kind : "video", ...(p.assetId ? { assetId: p.assetId } : {}) } : null;
   } catch {
     return null;
   }

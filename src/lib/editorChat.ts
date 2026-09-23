@@ -12,8 +12,8 @@ export type ChatCtx = {
   split: () => boolean;
   remove: (id: string) => void;
   duplicate: (id: string) => void;
-  add: (kind: "image" | "video", name: string, url: string) => void;
-  library: () => { url: string; kind: "image" | "video"; name: string }[];
+  add: (kind: "image" | "video" | "audio", name: string, url: string, assetId?: string) => void;
+  library: () => { id: string; url: string; kind: "image" | "video" | "audio"; name: string }[];
   seek: (t: number) => void;
   totalDur: () => number;
   playhead: () => number;
@@ -32,7 +32,7 @@ const HELP = `What I can do:
 • mirror · fade · fit / fill
 • caption "your title" · remove caption
 • trim to 8s · duplicate · delete
-• rename to "My Reel"
+• rename to My Reel
 • add <asset> — from your library
 • generate "prompt" — opens the generator
 • go to 1:30 · start · end
@@ -63,9 +63,9 @@ export function chatCommand(raw: string, ctx: ChatCtx): ChatOut {
     ctx.commitFn(() => []);
     return { reply: "Project cleared. ⌘Z brings it all back.", changed: true, followups: ["status"] };
   }
-  if (/^rename (to|as) "?([^"]+)"?$/.test(text) || /^name (it )?"?([^"]+)"?$/.test(text)) {
-    const m = raw.trim().match(/^rename (?:to|as)?\s+"?([^"]+)"?$/i)?.[1] ?? raw.trim().match(/^name (?:it )?"?([^"]+)"?$/i)?.[1];
-    const value = (m ?? "Untitled").slice(0, 40);
+  const rename = raw.trim().match(/^(?:rename(?:\s+(?:to|as))?|name(?:\s+it)?)\s+(.+)$/i);
+  if (rename) {
+    const value = rename[1]!.trim().replace(/^(["'])(.*)\1$/, "$2").trim().slice(0, 40) || "Untitled";
     ctx.rename(value);
     return { reply: `Project renamed to "${value}". That's your export filename.`, changed: true, followups: ["export", "status"] };
   }
@@ -99,7 +99,7 @@ export function chatCommand(raw: string, ctx: ChatCtx): ChatOut {
         ? lib[0]!
         : lib.find((g) => g.name.toLowerCase().includes(want) || g.url.toLowerCase().includes(want));
     if (!found) return needClip(`No asset matching "${want}" in the library.`);
-    ctx.add(found.kind, found.name, found.url);
+    ctx.add(found.kind, found.name, found.url, found.id);
     return { reply: `Added "${found.name}" to the timeline.`, changed: true, followups: ["split", "trim to 5s", "export"] };
   }
 

@@ -1,14 +1,14 @@
 import { useEffect, useRef, useState } from "react";
 import { Link } from "react-router-dom";
 import { Play, Pause, Scissors, Trash, Plus, Minus, Film, Volume, VolumeX, StepBack, StepFwd, ArrowLeft, Camera, Spark, X, Chat, Ratio, Monitor } from "../components/Icons";
-import { Clip, clipAt, clipLen, makeImageClip, makeVideoClip, splitClip, totalDur } from "../lib/editor";
+import { Clip, clipAt, clipLen, makeAudioClip, makeImageClip, makeVideoClip, splitClip, totalDur } from "../lib/editor";
 import { exportClips } from "../lib/ffmpeg";
 import { pendingMedia, clearPending } from "../lib/transfer";
 import GenerateModal, { Generated } from "../components/GenerateModal";
 import TimelineAgent from "../components/TimelineAgent";
 import AssetPicker from "../components/AssetPicker";
 import { activeWorkspaceProjectId, upsertWorkspaceArtifact } from "../lib/workspace";
-import { assetObjectUrl, deleteAsset, listAssets, LocalAsset, saveAsset, ASSETS_CHANGED } from "../lib/assets";
+import { assetObjectUrl, deleteAsset, getAsset, listAssets, LocalAsset, saveAsset, ASSETS_CHANGED } from "../lib/assets";
 import { bestFile, searchStock, searchStockPhotos, type StockClip, type StockPhoto } from "../lib/pexels";
 const FPS = 30;
 const PX0 = 72;
@@ -37,6 +37,16 @@ type Source = { url: string; blob?: Blob };
 
 function proxyMedia(url: string): string {
   return url.startsWith(CF) ? "/hfblob" + url.slice(CF.length) : url;
+}
+
+async function audioDuration(url: string): Promise<number> {
+  const el = document.createElement("audio");
+  el.preload = "metadata";
+  el.src = url;
+  return await new Promise((resolve) => {
+    el.onloadedmetadata = () => resolve(el.duration || 10);
+    el.onerror = () => resolve(10);
+  });
 }
 
 async function videoDuration(url: string): Promise<number> {
@@ -157,9 +167,10 @@ export default function Editor() {
   };
   const libToTimeline = async (asset: LocalAsset) => {
     const s: Source = { url: assetObjectUrl(asset), blob: asset.blob };
-    if (asset.kind === "image") addImage(s, asset.name);
+    if (asset.kind === "image") addImage(s, asset.name, asset.id);
+    else if (asset.kind === "audio") await addAudio(s, asset.name, asset.id);
     else {
-      try { await addVideo(s, asset.name); }
+      try { await addVideo(s, asset.name, asset.id); }
       catch (error) { flash(error instanceof Error ? error.message : "Could not add video"); }
     }
   };
@@ -191,6 +202,7 @@ export default function Editor() {
   const [drag, setDrag] = useState<null | "live" | "moved">(null);
   const sources = useRef(new Map<string, Source>());
   const videoRef = useRef<HTMLVideoElement | null>(null);
+  const audioRef = useRef<HTMLAudioElement | null>(null);
   const dragRef = useRef<{ x: number } | null>(null);
 
   // Undo/redo: whole-clip snapshots. Playhead and selection are transient —
@@ -257,7 +269,7 @@ export default function Editor() {
 
   // Image clips are driven by the playhead clock; video clips drive themselves.
   useEffect(() => {
-    if (!playing || isVideo) return;
+    if (!playing || current?.kind === "video" || current?.kind === "audio") return;
     let raf = 0;
     let last = performance.now();
     const step = (now: number) => {
@@ -268,7 +280,7 @@ export default function Editor() {
     };
     raf = requestAnimationFrame(step);
     return () => cancelAnimationFrame(raf);
-  }, [playing, isVideo, dur]);
+  }, [playing, current?.kind, dur]);
 
   // Mount/seek the native video when the clip (or its speed) changes.
   useEffect(() => {
@@ -279,6 +291,35 @@ export default function Editor() {
     el.currentTime = current.in;
     if (playing) void el.play().catch(() => {});
   }, [current?.id, current?.in, current?.out, current?.src, current?.speed]); // eslint-disable-line react-hooks/exhaustive-deps
+  useEffect(() => {
+    const el = audioRef.current;
+    if (!el || !current || current.kind !== "audio") return;
+    el.src = current.src;
+    el.playbackRate = current.speed ?? 1;
+    el.currentTime = current.in;
+    if (playing) void el.play().catch(() => {});
+  }, [current?.id, current?.in, current?.out, current?.src, current?.speed]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  useEffect(() => {
+    const el = audioRef.current;
+    if (!el || !current || current.kind !== "audio" || playing) return;
+    const want = current.in + (t - posOf(current.id)) * (current.speed ?? 1);
+    if (Math.abs(el.currentTime - want) > 0.3) el.currentTime = want;
+  }, [t, playing, current?.id]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  useEffect(() => {
+    const el = audioRef.current;
+    if (!el) return;
+    el.muted = muted;
+    el.volume = Math.min(1, current?.volume ?? 1);
+  }, [muted, current?.id, current?.volume]);
+
+  useEffect(() => {
+    const el = audioRef.current;
+    if (!el || current?.kind !== "audio") return;
+    if (playing) void el.play().catch(() => {});
+    else el.pause();
+  }, [playing, current?.id]);
 
   // Scrub sync (only while paused, to avoid fighting native playback).
   useEffect(() => {
@@ -315,38 +356,48 @@ export default function Editor() {
   useEffect(() => {
     if (boot.current) return;
     boot.current = true;
-    try {
-      const raw = localStorage.getItem(projectSaveKey) ?? (activeWorkspaceProjectId() === "project-default" ? localStorage.getItem(SAVE_KEY) : null);
-      if (raw) {
-        const saved = JSON.parse(raw) as { clips?: Clip[]; t?: number; name?: string };
-        const cs = (saved.clips ?? []).filter((c) => !c.src.startsWith("blob:"));
-        if (cs.length) {
-          cs.forEach((c) => {
-            if (!sources.current.has(c.id)) sources.current.set(c.id, { url: c.src });
-          });
-          setTimeline(cs);
-          if (saved.name) setName(saved.name);
-          setT(Math.min(saved.t ?? 0, totalDur(cs)));
+    void (async () => {
+      try {
+        const raw = localStorage.getItem(projectSaveKey) ?? (activeWorkspaceProjectId() === "project-default" ? localStorage.getItem(SAVE_KEY) : null);
+        if (raw) {
+          const saved = JSON.parse(raw) as { clips?: Clip[]; t?: number; name?: string };
+          const cs: Clip[] = [];
+          for (let clip of saved.clips ?? []) {
+            if (clip.src.startsWith("blob:")) {
+              const asset = clip.assetId ? await getAsset(clip.assetId) : null;
+              if (!asset) continue;
+              clip = { ...clip, src: assetObjectUrl(asset) };
+            }
+            cs.push(clip);
+          }
+          if (cs.length) {
+            cs.forEach((clip) => {
+              if (!sources.current.has(clip.id)) sources.current.set(clip.id, { url: clip.src });
+            });
+            setTimeline(cs);
+            if (saved.name) setName(saved.name);
+            setT(Math.min(saved.t ?? 0, totalDur(cs)));
+          }
         }
+      } catch {
+        /* corrupt save — fall through */
       }
-    } catch {
-      /* corrupt save — fall through */
-    }
-    const p = pendingMedia();
-    if (!p) return;
-    clearPending();
-    const s: Source = { url: proxyMedia(p.url) };
-    if (p.kind === "image") addImage(s, "generated");
-    else void addVideo(s, "generated");
+      const p = pendingMedia();
+      if (!p) return;
+      clearPending();
+      const s: Source = { url: proxyMedia(p.url) };
+      if (p.kind === "image") addImage(s, "generated", p.assetId);
+      else if (p.kind === "audio") void addAudio(s, "generated", p.assetId);
+      else void addVideo(s, "generated", p.assetId);
+    })();
   }, []);
   // Chat on another route/tab writes the same project-scoped timeline.
   useEffect(() => {
     const applyExternal = (value: unknown) => {
       const saved = value as { clips?: Clip[]; t?: number; name?: string };
       if (!Array.isArray(saved?.clips)) return;
-      const next = saved.clips.filter((clip) => clip && typeof clip.src === "string" && !clip.src.startsWith("blob:"));
       hist.current.past.push(clipsRef.current);
-      if (hist.current.past.length > 50) hist.current.past.shift();
+      const next = saved.clips.filter((clip) => clip && typeof clip.src === "string" && (!clip.src.startsWith("blob:") || Boolean(clip.assetId)));
       hist.current.future = [];
       next.forEach((clip) => {
         if (!sources.current.has(clip.id)) sources.current.set(clip.id, { url: clip.src });
@@ -392,7 +443,7 @@ export default function Editor() {
     if (!target || target.kind !== asset.kind) return;
     const source: Source = { url: assetObjectUrl(asset), blob: asset.blob };
     const id = crypto.randomUUID();
-    let replacement: Clip = { ...target, id, src: source.url, name: asset.name, thumb: undefined };
+    let replacement: Clip = { ...target, id, assetId: asset.id, src: source.url, name: asset.name, thumb: undefined };
     if (asset.kind === "video") {
       const duration = await videoDuration(source.url);
       const start = Math.min(target.in, Math.max(0, duration - 0.2));
@@ -404,16 +455,25 @@ export default function Editor() {
     flash("Replaced source");
   };
 
-  const addVideo = async (s: Source, nm: string) => {
+  const addVideo = async (s: Source, nm: string, assetId?: string) => {
     const d = await videoDuration(s.url);
-    const c = makeVideoClip(s.url, nm, d);
+    const c = { ...makeVideoClip(s.url, nm, d), ...(assetId ? { assetId } : {}) };
     sources.current.set(c.id, s);
     commitFn((cs) => [...cs, c]);
     setSel(c.id);
     flash(`Added · ${fmt(d)}`);
   };
-  const addImage = (s: Source, nm: string) => {
-    const c = makeImageClip(s.url, nm);
+  const addAudio = async (s: Source, nm: string, assetId?: string) => {
+    const d = await audioDuration(s.url);
+    const c = { ...makeAudioClip(s.url, nm, d), ...(assetId ? { assetId } : {}) };
+    sources.current.set(c.id, s);
+    commitFn((cs) => [...cs, c]);
+    setSel(c.id);
+    flash("Added audio");
+  };
+
+  const addImage = (s: Source, nm: string, assetId?: string) => {
+    const c = { ...makeImageClip(s.url, nm), ...(assetId ? { assetId } : {}) };
     sources.current.set(c.id, s);
     commitFn((cs) => [...cs, c]);
     setSel(c.id);
@@ -462,7 +522,7 @@ export default function Editor() {
     if (!files) return;
     void (async () => {
       for (const file of Array.from(files)) {
-        const kind = file.type.startsWith("video/") ? "video" : file.type.startsWith("image/") ? "image" : null;
+        const kind = file.type.startsWith("video/") ? "video" : file.type.startsWith("image/") ? "image" : file.type.startsWith("audio/") ? "audio" : null;
         if (!kind) continue;
         try {
           const asset = await saveAsset({ blob: file, kind, name: file.name, source: "upload" });
@@ -487,7 +547,8 @@ export default function Editor() {
     const raw = url.trim();
     if (!raw) return;
     const s: Source = { url: proxyMedia(raw) };
-    if (/\.(mp4|webm|mov)(\?|$)/i.test(raw)) void addVideo(s, "clip");
+    if (/\.(mp3|wav|m4a|aac|ogg)(\?|$)/i.test(raw)) void addAudio(s, "audio");
+    else if (/\.(mp4|webm|mov)(\?|$)/i.test(raw)) void addVideo(s, "clip");
     else addImage(s, "image");
     setUrl("");
   };
@@ -621,6 +682,16 @@ export default function Editor() {
     } else {
       setPlaying(false);
     }
+  };
+  const onAudioTime = () => {
+    const el = audioRef.current;
+    if (!el || !current || current.kind !== "audio") return;
+    if (el.currentTime >= current.out) {
+      el.pause();
+      onVideoEnd();
+      return;
+    }
+    setT(posOf(current.id) + (el.currentTime - current.in) / (current.speed ?? 1));
   };
 
   const stepFrame = (d: number) => {
@@ -875,6 +946,18 @@ export default function Editor() {
                   onEnded={onVideoEnd}
                   style={pvStyle}
                 />
+              ) : current.kind === "audio" ? (
+                <audio
+                  key={current.id}
+                  ref={audioRef}
+                  src={current.src}
+                  controls
+                  onTimeUpdate={onAudioTime}
+                  onEnded={onVideoEnd}
+                  onPlay={() => setPlaying(true)}
+                  onPause={() => setPlaying(false)}
+                  style={{ width: "100%" }}
+                />
               ) : (
                 <img key={current.id} src={current.src} alt={current.name} style={pvStyle} />
               )}
@@ -885,7 +968,7 @@ export default function Editor() {
           ) : (
             <div className="ed-empty">
               <Film size={22} />
-              <span>Add video or images, then export.</span>
+              <span>Add media, then export.</span>
             </div>
           )}
           {toast && <div className="ed-toast">{toast}</div>}
@@ -903,6 +986,8 @@ export default function Editor() {
                   <div className="lib-cell" key={asset.id} onClick={() => void libToTimeline(asset)} title={`Add "${asset.name}" to the timeline`}>
                     {asset.kind === "video" ? (
                       <video src={assetObjectUrl(asset)} muted loop autoPlay playsInline preload="metadata" />
+                    ) : asset.kind === "audio" ? (
+                      <audio src={assetObjectUrl(asset)} controls preload="metadata" />
                     ) : (
                       <img src={assetObjectUrl(asset)} alt={asset.name} loading="lazy" />
                     )}
@@ -924,8 +1009,8 @@ export default function Editor() {
           </div>
           <div className="ed-add">
             <label className="chip file">
-              <Plus size={13} /> Upload video / image
-              <input type="file" accept="video/*,image/*" multiple hidden onChange={(e) => onFiles(e.target.files, e.currentTarget)} />
+              <Plus size={13} /> Upload media
+              <input type="file" accept="video/*,image/*,audio/*" multiple hidden onChange={(e) => onFiles(e.target.files, e.currentTarget)} />
             </label>
             <div className="ed-url">
               <input
@@ -972,7 +1057,7 @@ export default function Editor() {
                 <span className="prop-tx">{selected.name}</span>
               </div>
               <div className="prop-row"><span>Timeline</span><span>{fmt(posOf(selected.id))}</span></div>
-              {selected.kind === "video" && (
+              {(selected.kind === "video" || selected.kind === "audio") && (
                 <div className="prop-row"><span>Source</span><span>{selected.dur.toFixed(1)}s</span></div>
               )}
               <div className="prop-row">
@@ -982,7 +1067,7 @@ export default function Editor() {
               </div>
               <div className="prop-row">
                 <span>Out</span>
-                <input className="prop-in" type="number" min={selected.in + 0.2} max={selected.kind === "video" ? selected.dur : selected.in + 60} step={0.1} value={Number(selected.out.toFixed(2))}
+                <input className="prop-in" type="number" min={selected.in + 0.2} max={(selected.kind === "video" || selected.kind === "audio") ? selected.dur : selected.in + 60} step={0.1} value={Number(selected.out.toFixed(2))}
                   onChange={(e) => patch(selected.id, { out: Math.max(selected.in + 0.2, Number(e.target.value) || selected.in + 0.2) })} />
               </div>
               <div className="prop-row"><span>Length</span><span>{clipLen(selected).toFixed(1)}s</span></div>
@@ -1000,7 +1085,7 @@ export default function Editor() {
               )}
 
               <div className="ed-cats-t" style={{ marginTop: 6 }}>Look</div>
-              {selected.kind === "video" && (
+              {(selected.kind === "video" || selected.kind === "audio") && (
                 <>
                   <div className="prop-row">
                     <span>Speed</span>
@@ -1089,7 +1174,7 @@ export default function Editor() {
             {clips.map((c, i) => (
               <div
                 key={c.id}
-                className={`tl-clip${sel === c.id ? " on" : ""}${c.kind === "image" ? " img" : ""}${drag === "moved" && sel === c.id ? " drag" : ""}`}
+                className={`tl-clip${sel === c.id ? " on" : ""}${c.kind === "image" ? " img" : c.kind === "audio" ? " aud" : ""}${drag === "moved" && sel === c.id ? " drag" : ""}`}
                 style={{ left: positions[i] * px, width: clipLen(c) * px }}
                 onClick={(e) => { e.stopPropagation(); setSel(c.id); }}
                 onDoubleClick={(e) => { e.stopPropagation(); goClip(c.id); }}
@@ -1098,7 +1183,7 @@ export default function Editor() {
                 {c.thumb && <img className="tl-thumb" src={c.thumb} alt="" draggable={false} />}
                 <span className="tl-name">
                   {c.name}
-                  {c.kind === "video" && (c.speed ?? 1) !== 1 && <em> {c.speed}×</em>}
+                  {(c.kind === "video" || c.kind === "audio") && (c.speed ?? 1) !== 1 && <em> {c.speed}×</em>}
                   {c.mirror && <em> ⇋</em>}
                   {c.fade && <em> ◐</em>}
                   {c.caption?.trim() && <em> T</em>}
@@ -1127,7 +1212,7 @@ export default function Editor() {
       <button className="chip" onClick={() => stepFrame(1)} disabled={!dur} aria-label="Next frame">
         <StepFwd size={13} />
       </button>
-      <button className="chip" onClick={() => setMuted((m) => !m)} disabled={!current || current.kind !== "video"} aria-label={muted ? "Unmute" : "Mute"}>
+      <button className="chip" onClick={() => setMuted((m) => !m)} disabled={!current || current.kind === "image"} aria-label={muted ? "Unmute" : "Mute"}>
         {muted ? <VolumeX size={13} /> : <Volume size={13} />}
       </button>
       <span className="ed-dur">{clips.length} clip{clips.length === 1 ? "" : "s"} · {fmt(dur)}</span>

@@ -2,7 +2,7 @@ import { useEffect, useRef, useState } from "react";
 import { useLocation, useNavigate } from "react-router-dom";
 import { ArrowUp, Film, Pause, Play, Spark } from "./Icons";
 import { chatCommand, type ChatCtx } from "../lib/editorChat";
-import { clipAt, clipLen, makeImageClip, makeVideoClip, totalDur, type Clip } from "../lib/editor";
+import { clipAt, clipLen, makeAudioClip, makeImageClip, makeVideoClip, totalDur, type Clip } from "../lib/editor";
 import { ASSETS_CHANGED, assetObjectUrl, getAsset, listAssets, saveAsset, type LocalAsset } from "../lib/assets";
 import { activeWorkspaceProjectId, readWorkspaceArtifacts, upsertWorkspaceArtifact } from "../lib/workspace";
 import { fetchFeed, generate, hasKeys, type FeedModel } from "../lib/hf";
@@ -13,7 +13,7 @@ import "./TimelineAgent.css";
 import AssetPicker from "./AssetPicker";
 const safeModel = (model: FeedModel) => isSupportedModel(model) && !isUnsupportedLegacyModel(model.mode) && (model.type === "image" || model.type === "video");
 
-type StockItem = { id: string; kind: "image" | "video"; title: string; url: string; thumb: string; credit: string; sourcePage: string; duration?: number };
+type StockItem = { id: string; kind: "image" | "video" | "audio"; title: string; url: string; thumb: string; credit: string; sourcePage: string; duration?: number };
 type Save = { clips: Clip[]; t: number; name: string };
 type Proposal = {
   prompt: string;
@@ -211,9 +211,24 @@ export default function TimelineAgent({ showPreview = true, exportRequest }: { s
   };
   const seek = (seconds: number) => { setPlaying(false); persist({ ...saveRef.current, t: Math.max(0, Math.min(seconds, totalDur(saveRef.current.clips))) }); };
   const undo = () => { const previous = history.current.pop(); if (!previous) { setNotice("No chat edits to undo."); return; } persist(previous); setNotice("Undone"); };
-  const addClip = (kind: "image" | "video", name: string, url: string) => {
-    const clip = kind === "image" ? makeImageClip(url, name) : makeVideoClip(url, name, 5);
-    commit((clips) => [...clips, clip]); setSelected(clip.id);
+  const addClip = (kind: "image" | "video" | "audio", name: string, url: string, assetId?: string) => {
+    const append = (duration?: number) => {
+      const clip = kind === "audio" ? makeAudioClip(url, name, duration ?? 10) : kind === "image" ? makeImageClip(url, name) : makeVideoClip(url, name, 5);
+      commit((clips) => [...clips, { ...clip, ...(assetId ? { assetId } : {}) }]); setSelected(clip.id);
+    };
+    if (kind !== "audio") { append(); return; }
+    const audio = new Audio();
+    audio.preload = "metadata";
+    let added = false;
+    const finish = (duration?: number) => {
+      if (added) return;
+      added = true;
+      append(duration);
+    };
+    audio.onloadedmetadata = () => finish(audio.duration);
+    audio.onerror = () => finish();
+    audio.src = url;
+    audio.load();
   };
   const saveStockItem = async (item: StockItem) => {
     try {
@@ -314,7 +329,7 @@ export default function TimelineAgent({ showPreview = true, exportRequest }: { s
     remove: (id) => { commit((clips) => clips.filter((clip) => clip.id !== id)); setSelected(null); },
     duplicate: (id) => commit((clips) => { const index = clips.findIndex((clip) => clip.id === id); if (index < 0) return clips; const copy = { ...clips[index]!, id: crypto.randomUUID() }; const next = [...clips]; next.splice(index + 1, 0, copy); return next; }),
     add: addClip,
-    library: () => assets.map((asset) => ({ url: assetObjectUrl(asset), kind: asset.kind, name: asset.name })),
+    library: () => assets.map((asset) => ({ id: asset.id, url: assetObjectUrl(asset), kind: asset.kind, name: asset.name })),
     seek, totalDur: () => totalDur(saveRef.current.clips), playhead: () => saveRef.current.t, rename: (name) => persist({ ...saveRef.current, name }),
     export: () => exportRequest ? (void exportRequest(), "Exporting — watch the progress in the Editor top bar.") : "Open the Editor to export this cut; rendering progress appears there.",
     generate: (prompt) => navigate("/image", { state: { workspacePrompt: prompt } }),

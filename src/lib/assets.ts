@@ -1,4 +1,4 @@
-export type AssetKind = "image" | "video";
+export type AssetKind = "image" | "video" | "audio";
 export type AssetSource = "upload" | "generation" | "catalog" | "export";
 
 export type LocalAsset = {
@@ -71,13 +71,13 @@ export async function saveAsset(input: AssetInput): Promise<LocalAsset> {
   if (!blob || blob.size === 0) throw new Error("The asset is empty or unavailable.");
   const asset: LocalAsset = {
     id: crypto.randomUUID(),
-    name: input.name.trim() || (input.kind === "image" ? "Untitled image" : "Untitled video"),
+    name: input.name.trim() || (input.kind === "image" ? "Untitled image" : input.kind === "audio" ? "Untitled audio" : "Untitled video"),
     kind: input.kind,
     source: input.source,
     ...(input.model ? { model: input.model } : {}),
     ...(input.prompt ? { prompt: input.prompt } : {}),
     ...(remoteUrl ? { remoteUrl } : {}),
-    mime: blob.type || (input.kind === "image" ? "image/unknown" : "video/unknown"),
+    mime: blob.type || (input.kind === "image" ? "image/unknown" : input.kind === "audio" ? "audio/unknown" : "video/unknown"),
     size: blob.size,
     createdAt: Date.now(),
     blob,
