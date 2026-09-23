@@ -1,15 +1,14 @@
 import { useEffect, useRef, useState } from "react";
-import FeedCard from "../components/FeedCard";
-import { Play, Pause, Scissors, Trash, Plus, Film, Volume, VolumeX, StepBack, StepFwd, ArrowLeft, Camera, Spark, X, Chat } from "../components/Icons";
+import { Link } from "react-router-dom";
+import { Play, Pause, Scissors, Trash, Plus, Minus, Film, Volume, VolumeX, StepBack, StepFwd, ArrowLeft, Camera, Spark, X, Chat, Ratio, Monitor } from "../components/Icons";
 import { Clip, clipAt, clipLen, makeImageClip, makeVideoClip, splitClip, totalDur } from "../lib/editor";
 import { exportClips } from "../lib/ffmpeg";
 import { pendingMedia, clearPending } from "../lib/transfer";
-import { useFeed } from "../lib/hf";
 import GenerateModal, { Generated } from "../components/GenerateModal";
-import ChatPanel from "../components/ChatPanel";
-import { ChatCtx } from "../lib/editorChat";
+import TimelineAgent from "../components/TimelineAgent";
+import AssetPicker from "../components/AssetPicker";
 import { activeWorkspaceProjectId, upsertWorkspaceArtifact } from "../lib/workspace";
-
+import { assetObjectUrl, deleteAsset, listAssets, LocalAsset, saveAsset, ASSETS_CHANGED } from "../lib/assets";
 const FPS = 30;
 const PX0 = 72;
 const ZOOMS = [24, 48, 72, 120];
@@ -114,43 +113,43 @@ export default function Editor() {
   const [sel, setSel] = useState<string | null>(null);
   const [chatOpen, setChatOpen] = useState(false);
   const [genOpen, setGenOpen] = useState(false);
+  const [assetPickerOpen, setAssetPickerOpen] = useState(false);
   const [genPrompt, setGenPrompt] = useState("");
   const [busy, setBusy] = useState(false);
-  const [lib, setLib] = useState<Generated[]>([]);
-  const LIB_KEY = "field-editor-library";
-  const libLoaded = useRef(false);
-  // Load the asset library once; remote URLs survive a refresh.
+  const [lib, setLib] = useState<LocalAsset[]>([]);
+  const savedGenerated = useRef(new Map<string, LocalAsset>());
+  const refreshLib = () => void listAssets().then((assets) => {
+    setLib(assets);
+    savedGenerated.current.clear();
+    for (const asset of assets) if (asset.remoteUrl) savedGenerated.current.set(asset.remoteUrl, asset);
+  }).catch((error) => flash(error instanceof Error ? error.message : "Could not load asset library"));
   useEffect(() => {
-    if (libLoaded.current) return;
-    libLoaded.current = true;
-    try {
-      const raw = localStorage.getItem(LIB_KEY);
-      if (raw) {
-        const items = (JSON.parse(raw) as Generated[]).filter((g) => !g.url.startsWith("blob:"));
-        if (items.length) setLib(items);
-      }
-    } catch {
-      /* corrupt save */
-    }
+    refreshLib();
+    window.addEventListener(ASSETS_CHANGED, refreshLib);
+    return () => window.removeEventListener(ASSETS_CHANGED, refreshLib);
   }, []);
-  const libSaveTimer = useRef<number>(0);
-  useEffect(() => {
-    window.clearTimeout(libSaveTimer.current);
-    libSaveTimer.current = window.setTimeout(() => {
-      try {
-        localStorage.setItem(LIB_KEY, JSON.stringify(lib.filter((g) => !g.url.startsWith("blob:"))));
-      } catch {
-        /* storage full */
-      }
-    }, 500);
-    return () => window.clearTimeout(libSaveTimer.current);
-  }, [lib]);
-  const libAdd = (g: Generated) => setLib((l) => [g, ...l].slice(0, 24));
-  const libRemove = (url: string) => setLib((l) => l.filter((g) => g.url !== url));
-  const libToTimeline = (g: Generated) => {
-    const s: Source = { url: proxyMedia(g.url) };
-    if (g.kind === "image") addImage(s, g.name);
-    else void addVideo(s, g.name);
+  const pendingSaves = useRef(new Map<string, Promise<LocalAsset>>());
+  const saveGenerated = (g: Generated) => {
+    const existing = savedGenerated.current.get(g.url);
+    if (existing) return Promise.resolve(existing);
+    const pending = pendingSaves.current.get(g.url);
+    if (pending) return pending;
+    const saving = saveAsset({ url: g.url, kind: g.kind, name: g.name, model: g.model, source: "generation" })
+      .then((asset) => {
+        savedGenerated.current.set(g.url, asset);
+        return asset;
+      })
+      .finally(() => pendingSaves.current.delete(g.url));
+    pendingSaves.current.set(g.url, saving);
+    return saving;
+  };
+  const libToTimeline = async (asset: LocalAsset) => {
+    const s: Source = { url: assetObjectUrl(asset), blob: asset.blob };
+    if (asset.kind === "image") addImage(s, asset.name);
+    else {
+      try { await addVideo(s, asset.name); }
+      catch (error) { flash(error instanceof Error ? error.message : "Could not add video"); }
+    }
   };
   const [progress, setProgress] = useState(0);
   const [url, setUrl] = useState("");
@@ -159,6 +158,7 @@ export default function Editor() {
   const [res, setRes] = useState<Res>("720");
   const [ratio, setRatio] = useState<Ratio>("16:9");
   const [name, setName] = useState("Untitled");
+  const [renderAsset, setRenderAsset] = useState<LocalAsset | null>(null);
   useEffect(() => {
     upsertWorkspaceArtifact({
       id: "editor",
@@ -167,14 +167,19 @@ export default function Editor() {
       summary: clips.length ? `${clips.length} clips · ${fmt(totalDur(clips))} timeline` : "No clips in the timeline yet.",
       route: "/editor",
       status: clips.length ? "ready" : "empty",
+      ...(renderAsset ? {
+        assetId: renderAsset.id,
+        outputUrl: renderAsset.remoteUrl,
+        outputKind: renderAsset.kind,
+        outputSource: "render",
+      } : {}),
     });
-  }, [clips, name]);
+  }, [clips, name, renderAsset]);
   const [muted, setMuted] = useState(true);
   const [drag, setDrag] = useState<null | "live" | "moved">(null);
   const sources = useRef(new Map<string, Source>());
   const videoRef = useRef<HTMLVideoElement | null>(null);
   const dragRef = useRef<{ x: number } | null>(null);
-  const feed = useFeed(1, 8, "video");
 
   // Undo/redo: whole-clip snapshots. Playhead and selection are transient —
   // they restore from the timeline position, not from history.
@@ -221,12 +226,6 @@ export default function Editor() {
     setTimeline(next);
     flash("Redone");
   };
-  // The chat dispatches undo as an event so it never captures a stale closure.
-  useEffect(() => {
-    const onChatUndo = () => undo();
-    window.addEventListener("field-chat-undo", onChatUndo);
-    return () => window.removeEventListener("field-chat-undo", onChatUndo);
-  });
 
   const dur = totalDur(clips);
   const { index } = clipAt(clips, t);
@@ -376,10 +375,10 @@ export default function Editor() {
     setToast(msg);
     setTimeout(() => setToast(""), 2200);
   };
-  const replaceSelectedFromLibrary = async (asset: Generated) => {
+  const replaceSelectedFromLibrary = async (asset: LocalAsset) => {
     const target = selected;
     if (!target || target.kind !== asset.kind) return;
-    const source: Source = { url: proxyMedia(asset.url) };
+    const source: Source = { url: assetObjectUrl(asset), blob: asset.blob };
     const id = crypto.randomUUID();
     let replacement: Clip = { ...target, id, src: source.url, name: asset.name, thumb: undefined };
     if (asset.kind === "video") {
@@ -411,12 +410,27 @@ export default function Editor() {
 
   const onFiles = (files: FileList | null, input: HTMLInputElement) => {
     if (!files) return;
-    Array.from(files).forEach((f) => {
-      const s: Source = { url: URL.createObjectURL(f), blob: f };
-      if (f.type.startsWith("video")) void addVideo(s, f.name);
-      else if (f.type.startsWith("image")) addImage(s, f.name);
-    });
+    void (async () => {
+      for (const file of Array.from(files)) {
+        const kind = file.type.startsWith("video/") ? "video" : file.type.startsWith("image/") ? "image" : null;
+        if (!kind) continue;
+        try {
+          const asset = await saveAsset({ blob: file, kind, name: file.name, source: "upload" });
+          await libToTimeline(asset);
+        } catch (error) {
+          flash(error instanceof Error ? error.message : "Could not add uploaded media");
+        }
+      }
+    })();
     input.value = ""; // allow re-selecting the same file
+  };
+
+  const addGeneratedToTimeline = async (g: Generated) => {
+    try {
+      await libToTimeline(await saveGenerated(g));
+    } catch (error) {
+      flash(error instanceof Error ? error.message : "Could not save generated media");
+    }
   };
 
   const addUrl = () => {
@@ -564,7 +578,10 @@ export default function Editor() {
     setT((x) => Math.max(0, Math.min(dur, x + d / FPS)));
   };
 
-  const zoom = () => setPx((p) => ZOOMS[(ZOOMS.indexOf(p) + 1) % ZOOMS.length]!);
+  const zoom = (direction: -1 | 1) => setPx((p) => {
+    const index = ZOOMS.indexOf(p);
+    return ZOOMS[Math.max(0, Math.min(ZOOMS.length - 1, index + direction))]!;
+  });
 
   const fileName = () => `${name.trim() || "field-edit"}.mp4`.replace(/[^\w\-. ]+/g, "");
 
@@ -575,70 +592,30 @@ export default function Editor() {
     flash("Loading engine…");
     try {
       const blob = await exportClips(clips, sources.current, setProgress, W, H);
+      const outputName = fileName();
       const a = document.createElement("a");
       a.href = URL.createObjectURL(blob);
-      a.download = fileName();
+      a.download = outputName;
       a.click();
-      flash(`Exported ${fileName()}`);
+      try {
+        const asset = await saveAsset({
+          blob,
+          kind: "video",
+          name: outputName,
+          source: "export",
+          prompt: name.trim() || "Untitled",
+        });
+        setRenderAsset(asset);
+        flash(`Exported ${outputName}`);
+      } catch (error) {
+        flash(`Exported ${outputName}, but could not save it: ${error instanceof Error ? error.message : "local storage failed"}`);
+      }
     } catch (e) {
       flash(e instanceof Error ? e.message : "Export failed");
     }
     setBusy(false);
   };
 
-  // The chat's view of the editor — every call lands through commit/patch,
-  // so its edits are live on the timeline and undoable like any other.
-  const chatCtx: ChatCtx = {
-    target: () => selected ?? current,
-    clipsCount: () => clips.length,
-    patch: (id, p) => commit(patchClip(clips, id, p)),
-    commitFn: (fn) => commitFn(fn),
-    split: () => {
-      const c = current;
-      if (!c) return false;
-      const { at } = clipAt(clips, t);
-      const parts = splitClip(c, at);
-      if (!parts) return false;
-      const next = [...clips];
-      next.splice(clips.indexOf(c), 1, parts[0], parts[1]);
-      commit(next);
-      return true;
-    },
-    remove: (id) => {
-      commit(clips.filter((c) => c.id !== id));
-      setSel(null);
-    },
-    duplicate: (id) => {
-      const i = clips.findIndex((c) => c.id === id);
-      if (i < 0) return;
-      const c = clips[i]!;
-      const copy: Clip = { ...c, id: crypto.randomUUID() };
-      sources.current.set(copy.id, sources.current.get(c.id)!);
-      const next = [...clips];
-      next.splice(i + 1, 0, copy);
-      commit(next);
-      setSel(copy.id);
-    },
-    add: (kind, nm, url) => {
-      const s: Source = { url: proxyMedia(url) };
-      if (kind === "image") addImage(s, nm);
-      else void addVideo(s, nm);
-    },
-    library: () => lib,
-    seek: (x) => {
-      setPlaying(false);
-      setT(x);
-    },
-    totalDur: () => dur,
-    playhead: () => t,
-    rename: (nm) => setName(nm),
-    export: () => void doExport(),
-    generate: (prompt) => {
-      setGenPrompt(prompt);
-      setGenOpen(true);
-    },
-    status: () => ({ n: clips.length, dur, name, res, ratio }),
-  };
 
   const trim = (e: React.PointerEvent, id: string, edge: "in" | "out") => {
     e.preventDefault();
@@ -741,58 +718,86 @@ export default function Editor() {
         objectFit: pv.fit === "cover" ? "cover" : "contain",
       }
     : undefined;
-
   return (
     <div className="editor">
       <div className="ed-top">
-        <input
-          className="ed-name"
-          value={name}
-          maxLength={40}
-          spellCheck={false}
-          aria-label="Project name"
-          onChange={(e) => setName(e.target.value)}
-        />
-        <span className="ed-time">{fmt(t)} / {fmt(dur)}</span>
+        <div className="ed-project">
+          <input
+            className="ed-name"
+            value={name}
+            maxLength={40}
+            spellCheck={false}
+            aria-label="Project name"
+            onChange={(e) => setName(e.target.value)}
+          />
+          <span className="ed-time">{fmt(t)} / {fmt(dur)}</span>
+          <div className="ed-history">
+            <button className="chip" onClick={undo} disabled={!hist.current.past.length} aria-label="Undo">
+              <ArrowLeft size={13} /> Undo
+            </button>
+            <button className="chip" onClick={redo} disabled={!hist.current.future.length} aria-label="Redo">
+              <ArrowLeft size={13} style={{ transform: "scaleX(-1)" }} /> Redo
+            </button>
+          </div>
+        </div>
         <div className="ed-actions">
-          <button className="chip" onClick={undo} disabled={!hist.current.past.length} aria-label="Undo">
-            <ArrowLeft size={13} /> Undo
-          </button>
-          <button className="chip" onClick={redo} disabled={!hist.current.future.length} aria-label="Redo">
-            <ArrowLeft size={13} style={{ transform: "scaleX(-1)" }} /> Redo
-          </button>
+          <div className="ed-control-group ed-view-actions" aria-label="Timeline view controls">
+            <div className="ed-zoom" aria-label="Zoom timeline">
+              <button className="chip" onClick={() => zoom(-1)} disabled={px === ZOOMS[0]} aria-label="Zoom out"><Minus size={13} /></button>
+              <span>{Math.round((px / 72) * 100)}%</span>
+              <button className="chip" onClick={() => zoom(1)} disabled={px === ZOOMS[ZOOMS.length - 1]} aria-label="Zoom in"><Plus size={13} /></button>
+            </div>
+            <label className="chip ed-select" aria-label="Export aspect ratio">
+              <Ratio size={13} />
+              <select value={ratio} onChange={(event) => setRatio(event.target.value as Ratio)} aria-label="Export aspect ratio">
+                {RATIOS.map((value) => <option key={value} value={value}>{value}</option>)}
+              </select>
+            </label>
+            <label className="chip ed-select" aria-label="Export resolution">
+              <Monitor size={13} />
+              <select value={res} onChange={(event) => setRes(event.target.value as Res)} aria-label="Export resolution">
+                <option value="720">720p</option>
+                <option value="1080">1080p</option>
+              </select>
+            </label>
+          </div>
           <span className="ed-sep" />
-          <button className="chip" onClick={zoom} aria-label="Zoom timeline">
-            <Plus size={13} /> {Math.round((px / 72) * 100)}%
-          </button>
-          <button className="chip" onClick={() => setRatio((r) => RATIOS[(RATIOS.indexOf(r) + 1) % RATIOS.length])} aria-label="Export aspect ratio">
-            {ratio}
-          </button>
-          <button className="chip" onClick={() => setRes((r) => (r === "720" ? "1080" : "720"))} aria-label="Export resolution">
-            {res === "720" ? "720p" : "1080p"}
-          </button>
+          <div className="ed-control-group ed-edit-actions" aria-label="Editing actions">
+            <button className="chip" onClick={split} disabled={!current}>
+              <Scissors size={13} /> Split
+            </button>
+            <button className="chip" onClick={duplicate} disabled={!sel} aria-label="Duplicate clip">
+              <Plus size={13} />
+            </button>
+            <button className="chip" onClick={remove} disabled={!sel} aria-label="Delete clip">
+              <Trash size={13} />
+            </button>
+          </div>
           <span className="ed-sep" />
-          <button className="chip" onClick={split} disabled={!current}>
-            <Scissors size={13} /> Split
-          </button>
-          <button className="chip" onClick={duplicate} disabled={!sel} aria-label="Duplicate clip">
-            <Plus size={13} />
-          </button>
-          <button className="chip" onClick={remove} disabled={!sel} aria-label="Delete clip">
-            <Trash size={13} />
-          </button>
-          <span className="ed-sep" />
-          <button className={`chip${chatOpen ? " on" : ""}`} onClick={() => setChatOpen((o) => !o)} aria-label="Toggle editor chat">
-            <Chat size={13} /> Chat
-          </button>
-          <button className="chip gen-chip" onClick={() => { setGenPrompt(""); setGenOpen(true); }}>
-            <Spark size={13} /> Generate
-          </button>
-          <button className="chip" onClick={newProject} disabled={!clips.length} aria-label="New project">
+          <div className="ed-control-group ed-secondary-actions" aria-label="Secondary actions">
+            <button className={`chip${chatOpen ? " on" : ""}`} onClick={() => {
+              setChatOpen((open) => {
+                if (!open) setGenOpen(false);
+                return !open;
+              });
+            }} aria-label="Toggle editor chat">
+              <Chat size={13} /> Chat
+            </button>
+            <button className={`chip gen-chip${genOpen ? " on" : ""}`} onClick={() => {
+              setGenPrompt("");
+              setGenOpen((open) => {
+                if (!open) setChatOpen(false);
+                return !open;
+              });
+            }}>
+              <Spark size={13} /> Generate
+            </button>
+          </div>
+          <button className="chip ed-new" onClick={newProject} disabled={!clips.length} aria-label="New project">
             New
           </button>
           <button className="ed-export" onClick={doExport} disabled={!clips.length || busy}>
-            {busy ? `Rendering ${Math.round(progress * 100)}%` : "Export MP4"}
+            {busy ? `Rendering ${Math.round(progress * 100)}%` : "Export"}
           </button>
         </div>
       </div>
@@ -830,6 +835,36 @@ export default function Editor() {
         </div>
 
         <div className="ed-side">
+          <div className="ed-cats ed-library">
+            <div className="ed-cats-head">
+              <div className="ed-cats-t">Asset library</div>
+              <button className="chip" type="button" onClick={() => setAssetPickerOpen(true)}>Open library</button>
+            </div>
+            {lib.length > 0 ? (
+              <div className="ed-lib-grid">
+                {lib.map((asset) => (
+                  <div className="lib-cell" key={asset.id} onClick={() => void libToTimeline(asset)} title={`Add "${asset.name}" to the timeline`}>
+                    {asset.kind === "video" ? (
+                      <video src={assetObjectUrl(asset)} muted loop autoPlay playsInline preload="metadata" />
+                    ) : (
+                      <img src={assetObjectUrl(asset)} alt={asset.name} loading="lazy" />
+                    )}
+                    <button className="lib-x" onClick={(event) => {
+                      event.stopPropagation();
+                      void deleteAsset(asset.id).then(() => {
+                        if (asset.remoteUrl) savedGenerated.current.delete(asset.remoteUrl);
+                      }).catch((error) => flash(error instanceof Error ? error.message : "Could not remove asset"));
+                    }} aria-label="Remove from library">
+                      <X size={11} />
+                    </button>
+                    <span className="lib-add">Add to timeline</span>
+                  </div>
+                ))}
+              </div>
+            ) : (
+              <div className="ed-cats-d">No saved assets yet.</div>
+            )}
+          </div>
           <div className="ed-add">
             <label className="chip file">
               <Plus size={13} /> Upload video / image
@@ -872,11 +907,11 @@ export default function Editor() {
                 <div className="prop-row col">
                   <span>Replace source</span>
                   <select className="prop-txt" aria-label="Replace selected clip source" value="" onChange={(event) => {
-                    const asset = lib.find((item) => item.url === event.target.value);
+                    const asset = lib.find((item) => item.id === event.target.value);
                     if (asset) void replaceSelectedFromLibrary(asset);
                   }}>
                     <option value="">Choose from library</option>
-                    {lib.filter((asset) => asset.kind === selected.kind).map((asset) => <option key={asset.url} value={asset.url}>{asset.name}</option>)}
+                    {lib.filter((asset) => asset.kind === selected.kind).map((asset) => <option key={asset.id} value={asset.id}>{asset.name}</option>)}
                   </select>
                 </div>
               )}
@@ -941,41 +976,20 @@ export default function Editor() {
             </div>
           )}
 
-          {lib.length > 0 && (
-            <div className="ed-cats">
-              <div className="ed-cats-t">Asset library</div>
-              <div className="ed-lib-grid">
-                {lib.map((g) => (
-                  <div className="lib-cell" key={g.url} onClick={() => libToTimeline(g)} title={`Add "${g.name}" to the timeline`}>
-                    {g.kind === "video" ? (
-                      <video src={proxyMedia(g.url)} muted loop autoPlay playsInline preload="metadata" />
-                    ) : (
-                      <img src={proxyMedia(g.url)} alt={g.name} loading="lazy" />
-                    )}
-                    <button className="lib-x" onClick={(e) => { e.stopPropagation(); libRemove(g.url); }} aria-label="Remove from library">
-                      <X size={11} />
-                    </button>
-                    <span className="lib-add">Add to timeline</span>
-                  </div>
-                ))}
-              </div>
-            </div>
-          )}
-          <div className="ed-cats">
-            <div className="ed-cats-t">Generated clips</div>
-            {feed.state === "ready" && (
-              <div className="ed-cat-grid">
-                {feed.items.slice(0, 4).map((m) => (
-                  <FeedCard key={m.mode} m={m} onOpen={() => void addVideo({ url: proxyMedia(m.video ?? m.thumb!) }, m.title)} />
-                ))}
-              </div>
-            )}
-            {feed.state === "loading" && <div className="ed-cats-d">Loading catalog…</div>}
-            {feed.state === "error" && <button className="chip" onClick={feed.retry}>Retry</button>}
-          </div>
         </div>
-        {chatOpen && <ChatPanel ctx={chatCtx} />}
+        {chatOpen && <aside className="ed-chat-pane" aria-label="Editor chat"><TimelineAgent showPreview={false} /></aside>}
+        {genOpen && <aside className="ed-generate-pane" aria-label="Generate asset"><GenerateModal
+          open={genOpen}
+          variant="panel"
+          initialPrompt={genPrompt}
+          onClose={() => setGenOpen(false)}
+          onAdd={(g) => void addGeneratedToTimeline(g)}
+          onLib={(g) => {
+            void saveGenerated(g).then(() => flash("Saved to library")).catch((error) => flash(error instanceof Error ? error.message : "Could not save generated media"));
+          }}
+        /></aside>}
       </div>
+      <AssetPicker open={assetPickerOpen} onClose={() => setAssetPickerOpen(false)} onSelect={libToTimeline} title="Library" />
 
       <div className="ed-timeline" onClick={scrub}>
         <div className="tl-ruler">
@@ -1020,35 +1034,22 @@ export default function Editor() {
       </div>
 
       <div className="ed-transport">
-        <button className="ed-play" onClick={() => setPlaying((p) => !p)} disabled={!dur} aria-label={playing ? "Pause" : "Play"}>
-          {playing ? <Pause size={16} /> : <Play size={16} />}
-        </button>
-        <button className="chip" onClick={() => { setT(0); setPlaying(false); }}>
-          <ArrowLeft size={13} /> Start
-        </button>
-        <span className="ed-sep" />
-        <button className="chip" onClick={() => stepFrame(-1)} disabled={!dur} aria-label="Previous frame">
-          <StepBack size={13} />
-        </button>
-        <button className="chip" onClick={() => stepFrame(1)} disabled={!dur} aria-label="Next frame">
-          <StepFwd size={13} />
-        </button>
-        <button className="chip" onClick={() => setMuted((m) => !m)} disabled={!current || current.kind !== "video"} aria-label={muted ? "Unmute" : "Mute"}>
-          {muted ? <VolumeX size={13} /> : <Volume size={13} />}
-        </button>
-        <span className="ed-dur">{clips.length} clip{clips.length === 1 ? "" : "s"} · {fmt(dur)}</span>
+      <button className="ed-play" onClick={() => { if (t > 0) { setT(0); setPlaying(false); } else setPlaying((p) => !p); }} disabled={!dur} aria-label={t > 0 ? "Return to start" : "Play"}>
+        {playing ? <Pause size={16} /> : <Play size={16} />}
+      </button>
+      <span className="ed-sep" />
+      <button className="chip" onClick={() => stepFrame(-1)} disabled={!dur} aria-label="Previous frame">
+        <StepBack size={13} />
+      </button>
+      <button className="chip" onClick={() => stepFrame(1)} disabled={!dur} aria-label="Next frame">
+        <StepFwd size={13} />
+      </button>
+      <button className="chip" onClick={() => setMuted((m) => !m)} disabled={!current || current.kind !== "video"} aria-label={muted ? "Unmute" : "Mute"}>
+        {muted ? <VolumeX size={13} /> : <Volume size={13} />}
+      </button>
+      <span className="ed-dur">{clips.length} clip{clips.length === 1 ? "" : "s"} · {fmt(dur)}</span>
       </div>
 
-      <GenerateModal
-        open={genOpen}
-        initialPrompt={genPrompt}
-        onClose={() => setGenOpen(false)}
-        onAdd={(g) => libToTimeline(g)}
-        onLib={(g) => {
-          libAdd(g);
-          flash("Saved to library");
-        }}
-      />
     </div>
   );
 }

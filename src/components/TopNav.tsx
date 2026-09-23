@@ -1,47 +1,60 @@
 import { useEffect, useState } from "react";
-import { NavLink, useLocation } from "react-router-dom";
+import { NavLink } from "react-router-dom";
 import { Spark } from "./Icons";
+
+type Theme = "light" | "dark";
+
+const THEME_OPTIONS: { value: Theme; label: string }[] = [
+  { value: "light", label: "Light" },
+  { value: "dark", label: "Dark" },
+];
+
 const LINKS = [
   { to: "/", label: "Create" },
   { to: "/workspace", label: "Workspace" },
   { to: "/editor", label: "Editor" },
   { to: "/chat", label: "Chat" },
+  { to: "/assets", label: "Library" },
 ];
 
 export default function TopNav() {
-  const location = useLocation();
-  const [dark, setDark] = useState(() => document.documentElement.dataset.theme === "dark");
+  const [theme, setTheme] = useState<Theme>(() => {
+    const current = document.documentElement.dataset.theme;
+    return current === "dark" ? "dark" : "light";
+  });
+
   useEffect(() => {
-    const theme = dark ? "dark" : "light";
     document.documentElement.dataset.theme = theme;
     localStorage.setItem("field-theme", theme);
-  }, [dark]);
+  }, [theme]);
+
   return (
     <header className="topnav">
       <NavLink to="/" className="brand">
-        <span className="brand-mark">
-          <Spark size={14} />
-        </span>
+        <span className="brand-mark"><Spark size={14} /></span>
         <span className="brand-name">Field</span>
       </NavLink>
-      {LINKS.map((l) => (
+      {LINKS.map((link) => (
         <NavLink
-          key={l.to}
-          to={l.to}
-          end={l.to === "/"}
-          className={({ isActive }) => `navlink${isActive || (l.to === "/launch" && location.pathname === "/launchframe") ? " active" : ""}`}
+          key={link.to}
+          to={link.to}
+          end={link.to === "/"}
+          className={({ isActive }) => `navlink${isActive ? " active" : ""}`}
         >
-          {l.label}
+          {link.label}
         </NavLink>
       ))}
       <div className="topnav-right">
-        <button className="theme-toggle" onClick={() => setDark((value) => !value)} aria-label={`Switch to ${dark ? "light" : "dark"} mode`}>
-          <span aria-hidden="true">◐</span>
-          <span>{dark ? "Dark" : "Light"}</span>
-        </button>
-        <NavLink to="/pricing" className="navlink">
-          Pricing
-        </NavLink>
+        <select
+          className="theme-toggle"
+          aria-label="Visual theme"
+          value={theme}
+          onChange={(event) => setTheme(event.target.value as Theme)}
+        >
+          {THEME_OPTIONS.map((option) => (
+            <option key={option.value} value={option.value}>{option.label}</option>
+          ))}
+        </select>
       </div>
     </header>
   );

@@ -10,7 +10,12 @@ import { useEffect, useState } from "react";
 //
 // Docs: https://docs.higgsfield.ai/docs
 
-export const hasKeys = import.meta.env.VITE_HF_CONFIGURED === "true";
+declare global {
+  interface Window { __FIELD_HF_CONFIGURED__?: boolean }
+}
+
+export const hasKeys = import.meta.env.VITE_HF_CONFIGURED === "true"
+  || (typeof window !== "undefined" && window.__FIELD_HF_CONFIGURED__ === true);
 
 /* ---------------- feed (public catalog, no auth) ---------------- */
 
@@ -47,56 +52,86 @@ export async function fetchFeed(page = 1, pageSize = 24, outputType?: string): P
   const res = await fetch(`/hfdata/catalog-models/?${q.toString()}`);
   if (!res.ok) throw new Error(`feed ${res.status}`);
   const data = (await res.json()) as { results: RawModel[] };
-  return data.results.map((r) => ({
-    title: r.title,
-    company: r.company.name,
-    type: r.output_types.includes("video") ? "video" : "image",
-    mode: r.default_mode_id,
-    video: r.preview_video?.video_url,
-    thumb: r.preview_video?.thumbnail_url ?? (typeof r.preview_image === "string" ? r.preview_image : r.preview_image?.image_url),
-    description: r.description,
-    price: r.pricing?.primary?.amount,
-    priceOriginal: r.pricing?.primary?.original_amount,
-    priceUnit: r.pricing?.primary?.unit,
-    discount: r.pricing?.primary?.discount_percentage,
-    releasedOn: r.released_on,
-  }));
+  const seen = new Set<string>();
+  return data.results.flatMap((r) => {
+    if (seen.has(r.default_mode_id)) return [];
+    seen.add(r.default_mode_id);
+    return [{
+      title: r.title,
+      company: r.company.name,
+      type: r.output_types.includes("video") ? "video" : "image",
+      mode: r.default_mode_id,
+      video: r.preview_video?.video_url,
+      thumb: r.preview_video?.thumbnail_url ?? (typeof r.preview_image === "string" ? r.preview_image : r.preview_image?.image_url),
+      description: r.description,
+      price: r.pricing?.primary?.amount,
+      priceOriginal: r.pricing?.primary?.original_amount,
+      priceUnit: r.pricing?.primary?.unit,
+      discount: r.pricing?.primary?.discount_percentage,
+      releasedOn: r.released_on,
+    }];
+  });
 }
 
 /* ---------------- generation (authed, async) ---------------- */
 
 export type GenResult = { url: string; kind: "image" | "video" | "audio" };
-
 export type GenStatus = "queued" | "in_progress" | "completed" | "failed" | "nsfw" | "canceled";
+export type GenerationRequest = { requestId?: string; statusUrl: string; cancelUrl?: string };
+export type GenerateOptions = {
+  onStatus?: (status: GenStatus) => void;
+  onRequest?: (request: GenerationRequest) => void;
+  signal?: AbortSignal;
+};
 
-const sleep = (ms: number) => { const { promise, resolve } = Promise.withResolvers<void>(); setTimeout(resolve, ms); return promise; };
+const sleep = (ms: number, signal?: AbortSignal) => new Promise<void>((resolve, reject) => {
+  if (signal?.aborted) { reject(new DOMException("Generation canceled", "AbortError")); return; }
+  const timer = window.setTimeout(resolve, ms);
+  signal?.addEventListener("abort", () => { window.clearTimeout(timer); reject(new DOMException("Generation canceled", "AbortError")); }, { once: true });
+});
 
+const viaProxy = (u: string) => {
+  if (u.startsWith("/hfapi/")) return u;
+  if (u.startsWith("/")) return `/hfapi${u}`;
+  return u.replace(/^https:\/\/api\.higgsfield\.ai/, "/hfapi");
+};
 
-// "https://api.higgsfield.ai/requests/x/status" -> "/hfapi/requests/x/status"
-const viaProxy = (u: string) => u.replace(/^https:\/\/api\.higgsfield\.ai/, "/hfapi");
+export async function cancelGeneration(request: Pick<GenerationRequest, "requestId" | "cancelUrl">): Promise<void> {
+  const url = request.cancelUrl ? viaProxy(request.cancelUrl) : request.requestId ? `/hfapi/requests/${encodeURIComponent(request.requestId)}/cancel` : "";
+  if (!url) throw new Error("This generation cannot be canceled.");
+  const res = await fetch(url, { method: "POST" });
+  if (!res.ok) {
+    const text = await res.text();
+    throw new Error(text || `Cancel failed (${res.status})`);
+  }
+}
 
 export async function generate(
   mode: string,
   body: Record<string, unknown>,
-  onStatus?: (s: GenStatus) => void,
+  callback?: ((status: GenStatus) => void) | GenerateOptions,
+  signal?: AbortSignal,
 ): Promise<GenResult> {
+  const options: GenerateOptions = typeof callback === "function" ? { onStatus: callback, signal } : { ...(callback ?? {}), signal: callback?.signal ?? signal };
   const res = await fetch(`/hfapi/${mode}`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(body),
+    signal: options.signal,
   });
   if (!res.ok) {
     const t = await res.text();
     let msg = `HTTP ${res.status}`;
-    try { msg = JSON.parse(t).detail?.message || msg; } catch { if (t.length < 120) msg = t; }
+    try { msg = JSON.parse(t).detail?.message || JSON.parse(t).error || msg; } catch { if (t.length < 120) msg = t; }
     throw new Error(msg);
   }
-  const { status_url } = (await res.json()) as { status_url: string };
-  const statusUrl = viaProxy(status_url);
-
+  const accepted = (await res.json()) as { request_id?: string; status_url?: string; cancel_url?: string };
+  if (!accepted.status_url) throw new Error("Higgsfield did not return a status URL.");
+  const request: GenerationRequest = { requestId: accepted.request_id, statusUrl: viaProxy(accepted.status_url), cancelUrl: accepted.cancel_url };
+  options.onRequest?.(request);
   let delay = 2000;
   for (;;) {
-    await sleep(delay);
+    await sleep(delay, options.signal);
     type Poll = {
       status: GenStatus;
       images?: { url: string }[];
@@ -105,36 +140,30 @@ export async function generate(
       audios?: { url: string }[];
       error?: { message?: string };
     };
-    const s = (await (await fetch(statusUrl)).json()) as Poll;
-    onStatus?.(s.status);
-    if (s.status === "completed") {
-      const img = s.images?.[0]?.url;
-      const vid = s.video?.url;
-      const aud = s.audio?.url ?? s.audios?.[0]?.url;
-      if (img) return { url: img, kind: "image" };
-      if (vid) return { url: vid, kind: "video" };
-      if (aud) return { url: aud, kind: "audio" };
-      throw new Error("completed with no output");
+    const pollResponse = await fetch(request.statusUrl, { signal: options.signal });
+    if (!pollResponse.ok) throw new Error(`Status request failed (${pollResponse.status})`);
+    const current = (await pollResponse.json()) as Poll;
+    options.onStatus?.(current.status);
+    if (current.status === "completed") {
+      const image = current.images?.[0]?.url;
+      const video = current.video?.url;
+      const audio = current.audio?.url ?? current.audios?.[0]?.url;
+      if (image) return { url: image, kind: "image" };
+      if (video) return { url: video, kind: "video" };
+      if (audio) return { url: audio, kind: "audio" };
+      throw new Error("Generation completed without an output.");
     }
-    if (s.status === "failed" || s.status === "nsfw" || s.status === "canceled") {
-      throw new Error(s.error?.message || s.status);
+    if (current.status === "failed" || current.status === "nsfw" || current.status === "canceled") {
+      throw new Error(current.error?.message || current.status);
     }
     delay = Math.min(delay * 1.5, 10000);
   }
 }
 
-/* ---------------- mode presets for the device ---------------- */
+/* ---------------- legacy endpoint identity ---------------- */
 
-export const IMAGE_MODE = "higgsfield-ai/soul/v2/standard"; // SOUL 2 — $0.0032/img, fastest in catalog
-export const VIDEO_MODE = "kling-video/v3.0/std/text-to-video"; // Kling 3.0 — $0.042/s
-
-export function imageBody(prompt: string, opts: { ratio: string; resolution: string }) {
-  return { prompt, aspect_ratio: opts.ratio, resolution: opts.resolution, enhance_prompt: true, batch_size: 1 };
-}
-
-export function videoBody(prompt: string, opts: { duration: number; ratio: string }) {
-  return { prompt, duration: opts.duration, aspect_ratio: opts.ratio };
-}
+export const LEGACY_IMAGE_MODE = "higgsfield-ai/soul/v2/standard";
+export const VIDEO_MODE = "kling-video/v3.0/std/text-to-video";
 
 
 /* ---------------- feed hook (one loading/ready/error/retry pattern) ---------------- */

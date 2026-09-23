@@ -31,7 +31,7 @@ function surfaceKicker(surface: Surface) {
 }
 
 function surfaceModel(surface: Surface) {
-  return surface === "studio" ? "Cinema Studio 4.0" : "SOUL 2";
+  return surface === "studio" ? "Cinema Studio 4.0" : "Marketing Studio Image";
 }
 
 function surfaceMode(surface: Surface) {

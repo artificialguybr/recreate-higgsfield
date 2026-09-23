@@ -1,7 +1,7 @@
-export type WorkspaceTool = "brief" | "chat" | "launch" | "studio" | "editor" | "export" | "image" | "video" | "audio" | "3d";
+export type WorkspaceTool = "brief" | "chat" | "launch" | "studio" | "editor" | "export" | "gallery" | "image" | "video" | "audio" | "3d" | "motion-control" | "motion-transfer";
 export type WorkspaceStatus = "ready" | "active" | "draft" | "empty" | "failed";
 export type WorkspacePositions = Record<string, { x: number; y: number }>;
-export type WorkspaceConnection = { id: string; source: string; target: string };
+export type WorkspaceConnection = { id: string; source: string; target: string; sourceHandle?: string; targetHandle?: string };
 
 export interface WorkspaceArtifact {
   id: string;
@@ -12,10 +12,14 @@ export interface WorkspaceArtifact {
   status: WorkspaceStatus;
   updatedAt: string;
   prompt?: string;
+  generationPrompt?: string;
   model?: string;
   outputUrl?: string;
-  outputKind?: "image" | "video" | "audio";
-  outputSource?: "generation" | "catalog";
+  outputKind?: "image" | "video" | "audio" | "3d";
+  outputSource?: "generation" | "catalog" | "render";
+  assetId?: string;
+  resolution?: "480p" | "720p";
+  parameters?: Record<string, string | number | boolean>;
 }
 
 export interface WorkspaceProject {
@@ -197,7 +201,7 @@ export function openWorkspaceProject(id: string): WorkspaceProject | null {
 }
 
 export function upsertWorkspaceArtifact(
-  patch: Pick<WorkspaceArtifact, "id" | "tool" | "title" | "summary" | "route" | "status"> & Partial<Pick<WorkspaceArtifact, "prompt" | "model" | "outputUrl" | "outputKind" | "outputSource">>,
+  patch: Pick<WorkspaceArtifact, "id" | "tool" | "title" | "summary" | "route" | "status"> & Partial<Pick<WorkspaceArtifact, "prompt" | "generationPrompt" | "model" | "outputUrl" | "outputKind" | "outputSource" | "assetId" | "resolution" | "parameters">>,
 ): WorkspaceArtifact[] {
   const current = readWorkspaceArtifacts();
   const index = current.findIndex((artifact) => artifact.id === patch.id);

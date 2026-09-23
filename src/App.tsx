@@ -8,6 +8,7 @@ import Pricing from "./pages/Pricing";
 import Editor from "./pages/Editor";
 import Launchframe from "./pages/Launchframe";
 import Workspace from "./pages/Workspace";
+import Assets from "./pages/Assets";
 
 export default function App() {
   return (
@@ -24,6 +25,7 @@ export default function App() {
           <Route path="/effects" element={<Home initialSurface="effects" />} />
           <Route path="/studio" element={<Home initialSurface="studio" />} />
           <Route path="/chat" element={<Supercomputer />} />
+          <Route path="/assets" element={<Assets />} />
           <Route path="/pricing" element={<Pricing />} />
           <Route path="/editor" element={<Editor />} />
           <Route path="/launch" element={<Launchframe />} />

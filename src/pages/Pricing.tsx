@@ -4,7 +4,7 @@ import { Check } from "../components/Icons";
 
 const PAYG = [
   "Billed per generation — from the live Higgsfield catalog",
-  "SOUL 2 images from $0.0032",
+  "Marketing Studio Image from $0.0121/img",
   "Kling 3.0 video from $0.042/s",
   "No subscriptions, no credits balance",
 ];

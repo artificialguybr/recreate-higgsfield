@@ -5,7 +5,7 @@ import { useLocation } from "react-router-dom";
 import type { ReactNode } from "react";
 
 const meta: Record<string, { title: string; sub: string; model: string; icon: ReactNode }> = {
-  Image: { title: "Image", sub: "Turn an idea into a still — photoreal, poster, or product.", model: "SOUL 2", icon: <ImageIc size={15} /> },
+  Image: { title: "Image", sub: "Turn an idea into a still — photoreal, poster, or product.", model: "Marketing Studio Image", icon: <ImageIc size={15} /> },
   Video: { title: "Video", sub: "A sentence becomes a shot. Refine it in the editor.", model: "Kling 3.0", icon: <VideoIc size={15} /> },
   Audio: { title: "Audio", sub: "Shape a soundtrack or voice from a description.", model: "Seed Audio 1.0", icon: <Music size={15} /> },
   "3D": { title: "3D", sub: "Prompt a scene, block out props, and set the camera.", model: "Field 3D", icon: <Cube size={15} /> },

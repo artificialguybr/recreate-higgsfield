@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { useNavigate } from "react-router-dom";
-import { ArrowLeft, ArrowRight, Check, Clock, Film, Spark, VideoIc, X } from "../components/Icons";
+import { ArrowLeft, ArrowRight, Check, Clock, Film, VideoIc, X } from "../components/Icons";
 import {
   approveLaunchframePlan,
   chatWithLaunchframe,
@@ -326,10 +326,8 @@ export default function Launchframe() {
     <div className="app-scroll launch-scroll">
       <div className="launch-page">
         <header className="launch-head">
-          <div className="launch-eyebrow"><span className="launch-mark"><Spark size={12} /></span><span>Launchframe</span><span className={`launch-api-state ${apiState}`}>{apiState === "online" ? "connected" : apiState === "offline" ? "offline" : "ready to connect"}</span></div>
-          <h1>Put your product in motion.</h1>
-          <p>Capture the real interface, shape the story, and approve every Higgsfield call before production starts.</p>
-          <button className="launch-workspace-link" onClick={() => navigate("/workspace")}>Back to project workspace <ArrowRight size={13} /></button>
+          <h1>Launch a product video.</h1>
+          <p>Start with a product URL. Review the story and approve production before anything runs.</p>
         </header>
 
         <nav className="launch-steps" aria-label="Launchframe workflow">

@@ -1,45 +1,20 @@
-import { useEffect, useMemo, useState } from "react";
-import { Spark, ImageIc, VideoIc, X } from "./Icons";
+import { useEffect, useState } from "react";
+import { X } from "./Icons";
 import { type FeedModel, fetchFeed, generate, hasKeys } from "../lib/hf";
+import { bodyForModel, defaultsForModel, isSupportedModel, isUnsupportedLegacyModel, modelSchema, type ModelField } from "../lib/hfModels";
 
-type Tab = "all" | "image" | "video";
 type Phase = "idle" | "working" | "done" | "error";
-type Param = { key: string; label: string; options: string[] };
 
-function paramsFor(m: FeedModel): Param[] {
-  if (m.type === "video") {
-    if (m.mode.includes("seedance")) return [];
-    return [{ key: "duration", label: "Duration", options: ["5s", "10s"] }, { key: "ratio", label: "Ratio", options: ["16:9", "9:16", "1:1"] }];
-  }
-  if (m.mode.includes("soul")) return [{ key: "resolution", label: "Resolution", options: ["720p", "1080p"] }, { key: "ratio", label: "Ratio", options: ["1:1", "16:9", "9:16"] }];
-  return [{ key: "resolution", label: "Resolution", options: ["1k", "2k", "4k"] }, { key: "ratio", label: "Ratio", options: ["1:1", "16:9", "9:16"] }];
-}
-
-function bodyFor(m: FeedModel, prompt: string, opts: Record<string, string>): Record<string, unknown> {
-  const body: Record<string, unknown> = { prompt };
-  if (m.type === "video") {
-    if (m.mode.includes("seedance")) return body;
-    body.duration = Number(opts.duration?.replace("s", "")) || 5;
-    if (opts.ratio) body.aspect_ratio = opts.ratio;
-    return body;
-  }
-  body.resolution = opts.resolution || (m.mode.includes("soul") ? "1080p" : "2k");
-  if (m.mode.includes("soul")) {
-    body.enhance_prompt = true;
-    body.batch_size = 1;
-  } else {
-    body.quality = "medium";
-  }
-  if (opts.ratio) body.aspect_ratio = opts.ratio;
-  return body;
+function paramsFor(model: FeedModel): ModelField[] {
+  return [...(modelSchema(model)?.fields ?? [])];
 }
 
 export type Generated = { url: string; kind: "image" | "video"; name: string; model: string };
 
-type Props = { open: boolean; initialPrompt?: string; onClose: () => void; onAdd: (g: Generated) => void; onLib: (g: Generated) => void };
+type Props = { open: boolean; initialPrompt?: string; variant?: "modal" | "panel"; onClose: () => void; onAdd: (g: Generated) => void; onLib: (g: Generated) => void };
 
-function optionValues(model: FeedModel | null): Record<string, string> {
-  return Object.fromEntries((model ? paramsFor(model) : []).map((param) => [param.key, param.options[0]]));
+function optionValues(model: FeedModel | null): Record<string, unknown> {
+  return defaultsForModel(model);
 }
 
 function demoResult(model: FeedModel, prompt: string): Generated | null {
@@ -48,13 +23,15 @@ function demoResult(model: FeedModel, prompt: string): Generated | null {
   return { url, kind: model.type === "video" ? "video" : "image", name: prompt.slice(0, 40) || model.title, model: model.title };
 }
 
-export default function GenerateModal({ open, initialPrompt = "", onClose, onAdd, onLib }: Props) {
+
+export default function GenerateModal({ open, initialPrompt = "", variant = "modal", onClose, onAdd, onLib }: Props) {
   const [models, setModels] = useState<FeedModel[]>([]);
   const [mState, setMState] = useState<"loading" | "ready" | "error">("loading");
-  const [tab, setTab] = useState<Tab>("all");
   const [sel, setSel] = useState<FeedModel | null>(null);
   const [prompt, setPrompt] = useState("");
-  const [opts, setOpts] = useState<Record<string, string>>({});
+  const [opts, setOpts] = useState<Record<string, unknown>>({});
+  const [imageUrlsText, setImageUrlsText] = useState("");
+  const [videoUrl, setVideoUrl] = useState("");
   const [phase, setPhase] = useState<Phase>("idle");
   const [status, setStatus] = useState("");
   const [result, setResult] = useState<Generated | null>(null);
@@ -67,10 +44,11 @@ export default function GenerateModal({ open, initialPrompt = "", onClose, onAdd
     if (!open) return;
     let alive = true;
     setMState("loading");
-    fetchFeed(1, 12).then((items) => {
+    fetchFeed(1, 48).then((items) => {
       if (!alive) return;
-      const first = items[0] ?? null;
-      setModels(items);
+      const available = items.filter((item) => isSupportedModel(item) && !isUnsupportedLegacyModel(item.mode));
+      const first = available[0] ?? null;
+      setModels(available);
       setSel(first);
       setOpts(optionValues(first));
       setMState("ready");
@@ -85,7 +63,13 @@ export default function GenerateModal({ open, initialPrompt = "", onClose, onAdd
     return () => window.removeEventListener("keydown", onKey);
   }, [open, onClose]);
 
-  const list = useMemo(() => tab === "all" ? models : models.filter((model) => model.type === tab), [models, tab]);
+  const list = models;
+  const schema = modelSchema(sel);
+  const imageUrls = imageUrlsText.split(/\r?\n|,/).map((value) => value.trim()).filter(Boolean);
+  const invalidImageUrl = imageUrls.some((value) => !/^https:\/\//i.test(value));
+  const invalidVideoUrl = Boolean(videoUrl.trim() && !/^https:\/\//i.test(videoUrl.trim()));
+  const invalidReference = invalidImageUrl || invalidVideoUrl;
+  const missingRequiredInput = Boolean(schema?.requiresImageUrls && (!imageUrls.length || invalidImageUrl)) || Boolean(schema?.requiresVideoUrl && (!videoUrl.trim() || invalidVideoUrl));
   if (!open) return null;
 
   const pick = (model: FeedModel) => {
@@ -97,7 +81,7 @@ export default function GenerateModal({ open, initialPrompt = "", onClose, onAdd
   };
 
   const run = async () => {
-    if (!sel || !prompt.trim() || phase === "working") return;
+    if (!sel || !prompt.trim() || missingRequiredInput || invalidReference || phase === "working") return;
     setPhase("working");
     setErr("");
     setResult(null);
@@ -105,7 +89,7 @@ export default function GenerateModal({ open, initialPrompt = "", onClose, onAdd
     try {
       let out: Generated | null = null;
       if (hasKeys) {
-        const generated = await generate(sel.mode, bodyFor(sel, prompt.trim(), opts), (next) => setStatus(next === "in_progress" ? "Rendering" : next));
+        const generated = await generate(sel.mode, bodyForModel(sel, prompt.trim(), opts, { imageUrls, videoUrl: videoUrl.trim() || undefined }), (next) => setStatus(next === "in_progress" ? "Rendering" : next));
         out = { url: generated.url, kind: generated.kind === "audio" ? "image" : generated.kind, name: prompt.trim().slice(0, 40) || sel.title, model: sel.title };
       } else {
         await new Promise((resolve) => window.setTimeout(resolve, 450));
@@ -120,32 +104,32 @@ export default function GenerateModal({ open, initialPrompt = "", onClose, onAdd
     }
   };
 
-  return (
-    <div className="gen-overlay" onMouseDown={(event) => event.target === event.currentTarget && onClose()}>
-      <div className="gen gen-focused" role="dialog" aria-label="Create asset">
-        <header className="gen-head">
-          <div><span className="gen-kicker">Create</span><strong className="gen-title">New asset</strong></div>
-          <button className="gen-close" onClick={onClose} aria-label="Close"><X size={14} /></button>
-        </header>
-        <div className="gen-focused-body">
-          <div className="gen-model-head"><div><span className="gen-section-label">Model</span><p>Choose the instrument. The prompt does the rest.</p></div><span className="gen-live">{models.length ? `${models.length} available` : "Loading models"}</span></div>
-          <div className="gen-tabs gen-tabs-focused">
-            {(["all", "image", "video"] as Tab[]).map((item) => <button key={item} className={tab === item ? "on" : ""} onClick={() => setTab(item)}>{item === "all" ? "All" : item === "image" ? "Images" : "Video"}</button>)}
-          </div>
-          <div className="gen-model-grid">
-            {mState === "loading" && <div className="gen-empty">Loading available models…</div>}
-            {mState === "error" && <div className="gen-empty">Models are unavailable right now.</div>}
-            {mState === "ready" && list.map((model) => <button key={model.mode + model.title} className={`gen-model-card${sel?.mode === model.mode ? " on" : ""}`} onClick={() => pick(model)}><span className="gen-model-type">{model.type === "video" ? <VideoIc size={12} /> : <ImageIc size={12} />}</span><span className="gen-model-copy"><strong>{model.title}</strong><small>{model.company}</small></span><span className="gen-model-price">{model.price ? `$${model.price}/${model.priceUnit ?? ""}` : "—"}</span></button>)}
-          </div>
-          <label className="gen-prompt-focused"><span className="gen-section-label">Direction</span><textarea rows={4} maxLength={500} placeholder={sel ? `Describe what ${sel.title} should make…` : "Choose a model first"} value={prompt} onChange={(event) => setPrompt(event.target.value)} /></label>
-          {sel && paramsFor(sel).length > 0 && <div className="gen-params gen-params-focused">{paramsFor(sel).map((param) => <div className="gen-param" key={param.key}><span>{param.label}</span><div className="gen-seg">{param.options.map((option) => <button key={option} className={`gen-btn-s${(opts[param.key] ?? param.options[0]) === option ? " on" : ""}`} onClick={() => setOpts((current) => ({ ...current, [param.key]: option }))}>{option}</button>)}</div></div>)}</div>}
-          {!hasKeys && <div className="gen-preview-note">Preview mode is on. Live generation needs Higgsfield credentials configured on the server.</div>}
-          {phase === "working" && <div className="gen-status"><span className="ring small" />{status} — preparing your asset</div>}
-          {phase === "error" && <div className="gen-status err">{err}</div>}
-          <footer className="gen-foot gen-foot-focused"><span className="gen-price">{sel?.price ? `Estimated $${sel.price}/${sel.priceUnit ?? ""}` : "Price shown before live generation"}</span><button className="gen-go" onClick={() => void run()} disabled={!sel || !prompt.trim() || phase === "working"}>{phase === "working" ? "Working…" : hasKeys ? "Generate" : "Preview"}</button></footer>
-          {result && <div className="gen-result gen-result-focused"><div className="gen-result-media">{result.kind === "video" ? <video src={result.url} controls muted loop playsInline /> : <img src={result.url} alt={result.name} />}</div><div className="gen-result-actions"><span className="gen-result-name">{result.name} · {result.model}</span><div className="gen-result-btns"><button className="chip" onClick={() => onLib(result)}>Save</button><button className="gen-go" onClick={() => { onAdd(result); onClose(); }}>Add to timeline</button></div></div></div>}
-        </div>
+  const content = (
+    <div className="gen gen-focused" role="dialog" aria-label="Create asset">
+      <header className="gen-head">
+        <div><span className="gen-kicker">Generate</span><strong className="gen-title">New asset</strong></div>
+        <button className="gen-close" onClick={onClose} aria-label="Close"><X size={14} /></button>
+      </header>
+      <div className="gen-focused-body">
+        <label className="gen-prompt-focused"><span className="gen-section-label">Direction</span><textarea className="device-input" rows={5} maxLength={500} placeholder={sel ? `Describe what ${sel.title} should make…` : "Pick a model below, then describe the idea."} value={prompt} onChange={(event) => setPrompt(event.target.value)} /></label>
+        <label className="model-picker gen-model-picker"><span>Model</span>
+          <select value={sel?.mode ?? ""} onChange={(event) => { const model = models.find((item) => item.mode === event.target.value); setSel(model ?? null); if (model) setOpts(optionValues(model)); }}>
+            <option value="">Choose a model</option>
+            {list.map((model) => <option key={model.mode + model.title} value={model.mode}>{model.title} · {model.company}{model.price ? ` · $${model.price}/${model.priceUnit ?? ""}` : ""}</option>)}
+          </select>
+        </label>
+        {schema?.acceptsImageUrls && <label className="gen-prompt-focused"><span className="gen-section-label">Reference images <small>{schema.requiresImageUrls ? "required" : "optional"}</small></span><textarea className="device-input gen-reference-input" rows={2} placeholder="Paste one public HTTPS URL per line…" value={imageUrlsText} onChange={(event) => setImageUrlsText(event.target.value)} /></label>}
+        {schema?.acceptsVideoUrl && <label className="gen-prompt-focused"><span className="gen-section-label">Motion video URL <small>{schema.requiresVideoUrl ? "required" : "optional"}</small></span><input className="device-input gen-reference-input" type="url" placeholder="https://…" value={videoUrl} onChange={(event) => setVideoUrl(event.target.value)} /></label>}
+        {sel && paramsFor(sel).length > 0 && <div className="gen-params gen-params-focused">{paramsFor(sel).map((param) => <div className="gen-param" key={param.key}><span>{param.label}</span>{param.type === "select" ? <select className="gen-param-select" value={String(opts[param.key] ?? param.default)} onChange={(event) => setOpts((current) => ({ ...current, [param.key]: event.target.value }))}>{(param.options ?? []).map((option) => <option key={option} value={option}>{option}</option>)}</select> : param.type === "boolean" ? <input type="checkbox" checked={Boolean(opts[param.key] ?? param.default)} onChange={(event) => setOpts((current) => ({ ...current, [param.key]: event.target.checked }))} /> : <input className="gen-param-input" type="number" min={param.min} max={param.max} step={param.step} value={String(opts[param.key] ?? param.default)} onChange={(event) => setOpts((current) => ({ ...current, [param.key]: event.target.value }))} />}</div>)}</div>}
+        {!hasKeys && <div className="gen-preview-note">Preview mode is on. Live generation needs Higgsfield credentials configured on the server.</div>}
+        <footer className="gen-foot gen-foot-focused"><span className="gen-price">{sel?.price ? `Estimated $${sel.price}/${sel.priceUnit ?? ""}` : "Price shown before live generation"}</span><button className="gen-go" onClick={() => void run()} disabled={!sel || !prompt.trim() || missingRequiredInput || invalidReference || phase === "working"}>{phase === "working" ? "Working…" : hasKeys ? "Generate" : "Preview"}</button></footer>
+        {invalidReference && <div className="gen-status err">Reference assets must use public HTTPS URLs.</div>}
+        {phase === "error" && <div className="gen-status err">{err}</div>}
+        {result && <div className="gen-result gen-result-focused"><div className="gen-result-media">{result.kind === "video" ? <video src={result.url} controls muted loop playsInline /> : <img src={result.url} alt={result.name} />}</div><div className="gen-result-actions"><span className="gen-result-name">{result.name} · {result.model}</span><div className="gen-result-btns"><button className="chip" onClick={() => onLib(result)}>Save</button><button className="gen-go" onClick={() => { onAdd(result); onClose(); }}>Add to timeline</button></div></div></div>}
       </div>
     </div>
   );
+  return variant === "panel"
+    ? <div className="gen-panel">{content}</div>
+    : <div className="gen-overlay" onMouseDown={(event) => event.target === event.currentTarget && onClose()}>{content}</div>;
 }
