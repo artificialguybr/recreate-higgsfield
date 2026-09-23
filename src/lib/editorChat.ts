@@ -64,9 +64,10 @@ export function chatCommand(raw: string, ctx: ChatCtx): ChatOut {
     return { reply: "Project cleared. ⌘Z brings it all back.", changed: true, followups: ["status"] };
   }
   if (/^rename (to|as) "?([^"]+)"?$/.test(text) || /^name (it )?"?([^"]+)"?$/.test(text)) {
-    const m = text.match(/^rename (to|as) "?([^"]+)"?$/)?.[2] ?? text.match(/^name (it )?"?([^"]+)"?$/)?.[2];
-    ctx.rename((m ?? "Untitled").slice(0, 40));
-    return { reply: `Project renamed to "${m}". That's your export filename.`, changed: true, followups: ["export", "status"] };
+    const m = raw.trim().match(/^rename (?:to|as)?\s+"?([^"]+)"?$/i)?.[1] ?? raw.trim().match(/^name (?:it )?"?([^"]+)"?$/i)?.[1];
+    const value = (m ?? "Untitled").slice(0, 40);
+    ctx.rename(value);
+    return { reply: `Project renamed to "${value}". That's your export filename.`, changed: true, followups: ["export", "status"] };
   }
 
   // ---- transport ----
