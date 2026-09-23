@@ -12,11 +12,11 @@ import {
   type FeedModel,
 } from "../lib/hf";
 import { setPending } from "../lib/transfer";
-import { upsertWorkspaceArtifact } from "../lib/workspace";
+import { activeWorkspaceProjectId, upsertWorkspaceArtifact } from "../lib/workspace";
 
 type Mode = "image" | "video";
 type Media = { url: string; kind: "image" | "video"; title: string; note?: "catalog" };
-type Msg = { who: "user" | "ai"; tx: string; media?: Media; working?: boolean };
+type Msg = { who: "user" | "ai"; tx: string; mode?: Mode; media?: Media; working?: boolean };
 
 const IDEAS: { label: string; prompt: string; mode: Mode }[] = [
   { label: "Product shot", prompt: "Studio product shot of a ceramic watch, soft key light, dark background", mode: "image" },
@@ -30,15 +30,23 @@ const IDEAS: { label: string; prompt: string; mode: Mode }[] = [
 export default function Supercomputer() {
   const location = useLocation();
   const nav = useNavigate();
-  const [msgs, setMsgs] = useState<Msg[]>([]);
+  const chatKey = useRef(`field-chat:${activeWorkspaceProjectId()}`).current;
+  const [msgs, setMsgs] = useState<Msg[]>(() => {
+    try {
+      const saved = JSON.parse(localStorage.getItem(chatKey) ?? "[]") as Msg[];
+      return Array.isArray(saved) ? saved.filter((msg) => msg && (msg.who === "user" || msg.who === "ai") && typeof msg.tx === "string" && !msg.working) : [];
+    } catch {
+      return [];
+    }
+  });
   const [busy, setBusy] = useState(false);
   const [val, setVal] = useState("");
   const [model, setModel] = useState<Mode>("image");
   const [sugs, setSugs] = useState<FeedModel[]>([]);
   const [n, setN] = useState(0);
-  const last = useRef<{ prompt: string; mode: Mode } | null>(null);
   const taRef = useRef<HTMLTextAreaElement | null>(null);
   const endRef = useRef<HTMLDivElement | null>(null);
+  const lastUser = [...msgs].reverse().find((msg) => msg.who === "user");
 
   useEffect(() => {
     let on = true;
@@ -51,9 +59,18 @@ export default function Supercomputer() {
     const workspacePrompt = (location.state as { workspacePrompt?: string } | null)?.workspacePrompt;
     if (workspacePrompt) setVal(workspacePrompt);
   }, [location.key]);
+  useEffect(() => {
+    const messages = msgs[msgs.length - 1]?.working ? msgs.slice(0, -2) : msgs;
+    try {
+      localStorage.setItem(chatKey, JSON.stringify(messages));
+    } catch {
+      /* Storage is optional; generation remains available. */
+    }
+  }, [chatKey, msgs]);
 
   useEffect(() => {
-    endRef.current?.scrollIntoView({ behavior: "smooth", block: "end" });
+    const thread = endRef.current?.parentElement;
+    if (thread) thread.scrollTo({ top: thread.scrollHeight, behavior: "smooth" });
   }, [msgs]);
 
   const send = (raw?: string, m?: Mode) => {
@@ -64,11 +81,10 @@ export default function Supercomputer() {
     if (taRef.current) taRef.current.style.height = "auto";
     setMsgs((ms) => [
       ...ms,
-      { who: "user", tx },
+      { who: "user", tx, mode },
       { who: "ai", working: true, tx: mode === "image" ? "Generating with SOUL 2" : "Generating with Kling 3.0" },
     ]);
     setBusy(true);
-    last.current = { prompt: tx, mode };
 
     const done = (media: Media | undefined, reply: string) => {
       setMsgs((ms) => {
@@ -83,7 +99,7 @@ export default function Supercomputer() {
         summary: media ? `${media.note ? "Catalog preview" : "Generated"} ${media.kind} ready to send to Editor.` : reply.slice(0, 100),
         route: "/chat",
         status: "ready",
-        prompt: last.current?.prompt,
+        prompt: tx,
         outputUrl: media?.url,
         outputKind: media?.kind,
         outputSource: media?.note ? "catalog" : "generation",
@@ -120,7 +136,7 @@ export default function Supercomputer() {
         }
       })();
     } else {
-      setTimeout(() => fallback("No API key in .env —"), 900);
+      setTimeout(() => fallback("Live generation isn't configured on this server."), 900);
     }
   };
 
@@ -133,7 +149,6 @@ export default function Supercomputer() {
     setMsgs([]);
     setN(0);
     setVal("");
-    last.current = null;
   };
 
   return (
@@ -161,7 +176,7 @@ export default function Supercomputer() {
       </aside>
       <div className="studio-canvas">
         <div className="chat-wrap">
-          <div className="c2-main">
+          <div className={`c2-main${msgs.length ? " has-thread" : ""}`}>
             {msgs.length === 0 ? (
               <div className="c2-hero">
                 <div className="chat-greeting">What are we making?</div>
@@ -210,15 +225,15 @@ export default function Supercomputer() {
                     )}
                     {m.who === "ai" && !m.working && i === msgs.length - 1 && !busy && (
                       <div className="follows">
-                        {last.current && (
-                          <button className="chip" onClick={() => send(last.current!.prompt, last.current!.mode)}>
+                        {lastUser && (
+                          <button className="chip" onClick={() => send(lastUser!.tx, lastUser!.mode)}>
                             Regenerate
                           </button>
                         )}
-                        <button className="chip" onClick={() => send(`${last.current?.prompt ?? ""} — darker and more dramatic`, last.current?.mode)}>
+                        <button className="chip" onClick={() => send(`${lastUser?.tx ?? ""} — darker and more dramatic`, lastUser?.mode)}>
                           Darker & dramatic
                         </button>
-                        <button className="chip" onClick={() => send(`${last.current?.prompt ?? ""} — wide angle, more room`, last.current?.mode)}>
+                        <button className="chip" onClick={() => send(`${lastUser?.tx ?? ""} — wide angle, more room`, lastUser?.mode)}>
                           Wide angle
                         </button>
                       </div>

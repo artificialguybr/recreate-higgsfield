@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { ImageIc, VideoIc, Music, Cube, Ratio, Clock, Monitor, ArrowUp, Check, Film } from "./Icons";
 import { setPending } from "../lib/transfer";
+import { upsertWorkspaceArtifact } from "../lib/workspace";
 import { hasKeys, generate, fetchFeed, IMAGE_MODE, VIDEO_MODE, type GenResult, type FeedModel } from "../lib/hf";
 
 export type Mode = "Image" | "Video" | "Audio" | "3D";
@@ -200,6 +201,27 @@ export default function Composer({
     return body;
   };
 
+  const syncWorkspaceAsset = (p: string, phase: "active" | "ready" | "failed", output?: GenResult, error = "") => {
+    if (mode !== "Image" && mode !== "Video") return;
+    const tool = mode.toLowerCase() as "image" | "video";
+    const hasMedia = Boolean(output && !output.url.startsWith("gradient:"));
+    upsertWorkspaceArtifact({
+      id: tool,
+      tool,
+      title: selectedModelName || DEFAULT_MODELS[mode],
+      summary: phase === "active" ? `Generating with ${selectedModelName}…` : phase === "failed" ? error : hasKeys ? `${tool} generation complete.` : hasMedia ? `Catalog preview · ${selectedModelName}` : "Demo preview · no live output.",
+      route: `/${tool}`,
+      status: phase,
+      prompt: p,
+      model: selectedModelName,
+      ...(phase === "ready" ? {
+        outputUrl: hasMedia ? output?.url : undefined,
+        outputKind: hasMedia ? tool : undefined,
+        outputSource: hasMedia ? hasKeys ? "generation" : "catalog" : undefined,
+      } : {}),
+    });
+  };
+
   const generateWork = async () => {
     const p = (mode === "Audio" && audioTab === "tts" && audioScript.trim() ? audioScript : prompt).trim();
     if (!p || busy.current) return;
@@ -207,9 +229,12 @@ export default function Composer({
     setError("");
     setResult(null);
     setPhase("working");
+    syncWorkspaceAsset(p, "active");
     if (!hasKeys || mode === "Audio" || mode === "3D") {
       await new Promise((r) => setTimeout(r, 900));
-      setResult(await demoResult(p, mode));
+      const r = await demoResult(p, mode);
+      setResult(r);
+      syncWorkspaceAsset(p, "ready", r);
       setPhase("done");
       busy.current = false;
       return;
@@ -219,9 +244,12 @@ export default function Composer({
       const body = mode === "Image" ? imagePayload(p) : videoPayload(p);
       const r = await generate(endpoint, body, (s) => setStatus(s));
       setResult(r);
+      syncWorkspaceAsset(p, "ready", r);
       setPhase("done");
     } catch (e) {
-      setError(e instanceof Error ? e.message : String(e));
+      const message = e instanceof Error ? e.message : String(e);
+      setError(message);
+      syncWorkspaceAsset(p, "failed", undefined, message);
       setPhase("error");
     }
     busy.current = false;

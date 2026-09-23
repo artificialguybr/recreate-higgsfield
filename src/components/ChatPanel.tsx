@@ -4,7 +4,6 @@ import { Spark, ArrowUp } from "./Icons";
 
 type Msg = { id: number; role: "user" | "ai"; text: string; followups?: string[] };
 
-let n = 0;
 
 const SUGGESTIONS = ["status", 'caption "Made with Field"', "speed 1.5×", "add first"];
 
@@ -13,7 +12,7 @@ export default function ChatPanel({ ctx }: { ctx: ChatCtx }) {
     {
       id: -1,
       role: "ai",
-      text: "I edit through the same timeline as you — everything I do shows up live and undoes with ⌘Z. Try one of these, or ask in plain words.",
+      text: "Edits appear on the timeline immediately and undo with ⌘Z. Type “help” to see the available commands.",
       followups: SUGGESTIONS,
     },
   ]);
@@ -21,24 +20,29 @@ export default function ChatPanel({ ctx }: { ctx: ChatCtx }) {
   const [thinking, setThinking] = useState(false);
   const endRef = useRef<HTMLDivElement | null>(null);
   const busy = useRef(false);
+  const nextId = useRef(0);
+  const timer = useRef<number | null>(null);
 
   useEffect(() => {
     endRef.current?.scrollIntoView({ behavior: "smooth", block: "end" });
   }, [msgs, thinking]);
+  useEffect(() => () => {
+    if (timer.current !== null) window.clearTimeout(timer.current);
+  }, []);
 
   const send = (raw: string) => {
     const text = raw.trim();
     if (!text || busy.current) return;
     busy.current = true;
-    setMsgs((m) => [...m, { id: ++n, role: "user", text }]);
+    setMsgs((m) => [...m, { id: ++nextId.current, role: "user", text }]);
     setVal("");
     setThinking(true);
-    // a beat, so the edit reads as an action, not an accident
-    setTimeout(() => {
+    timer.current = window.setTimeout(() => {
       const out = chatCommand(text, ctx);
       setThinking(false);
-      setMsgs((m) => [...m, { id: ++n, role: "ai", text: out.reply, followups: out.followups }]);
+      setMsgs((m) => [...m, { id: ++nextId.current, role: "ai", text: out.reply, followups: out.followups }]);
       busy.current = false;
+      timer.current = null;
     }, 450);
   };
 

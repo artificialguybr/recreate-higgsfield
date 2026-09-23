@@ -111,6 +111,7 @@ export function chatCommand(raw: string, ctx: ChatCtx): ChatOut {
     if (!ctx.split()) return needClip("Split failed — move the playhead into a clip first.");
     return tgt(`Split at ${ctx.playhead().toFixed(2)}s.`);
   }
+  if (text === "undo it" || text === "undo") return (window.dispatchEvent(new CustomEvent("field-chat-undo")), { reply: "Undone." });
   if (!c) return noClip();
 
   const spd = text.match(/^speed\s+(?:to\s+)?(\d+(?:\.\d+)?)\s*[x×]?$/);
@@ -172,7 +173,6 @@ export function chatCommand(raw: string, ctx: ChatCtx): ChatOut {
     return tgt("Deleted. ⌘Z brings it back.");
   }
 
-  if (text === "undo it" || text === "undo") return (window.dispatchEvent(new CustomEvent("field-chat-undo")), { reply: "Undone." });
 
   return {
     reply: `I didn't catch that. ${HELP}`,

@@ -10,12 +10,7 @@ import { useEffect, useState } from "react";
 //
 // Docs: https://docs.higgsfield.ai/docs
 
-const KEY_ID = import.meta.env.VITE_HF_KEY_ID as string | undefined;
-const KEY_SECRET = import.meta.env.VITE_HF_KEY_SECRET as string | undefined;
-
-export const hasKeys = Boolean(KEY_ID && KEY_SECRET);
-
-const auth = () => ({ Authorization: `Key ${KEY_ID}:${KEY_SECRET}` });
+export const hasKeys = import.meta.env.VITE_HF_CONFIGURED === "true";
 
 /* ---------------- feed (public catalog, no auth) ---------------- */
 
@@ -87,7 +82,7 @@ export async function generate(
 ): Promise<GenResult> {
   const res = await fetch(`/hfapi/${mode}`, {
     method: "POST",
-    headers: { ...auth(), "Content-Type": "application/json" },
+    headers: { "Content-Type": "application/json" },
     body: JSON.stringify(body),
   });
   if (!res.ok) {
@@ -110,7 +105,7 @@ export async function generate(
       audios?: { url: string }[];
       error?: { message?: string };
     };
-    const s = (await (await fetch(statusUrl, { headers: auth() })).json()) as Poll;
+    const s = (await (await fetch(statusUrl)).json()) as Poll;
     onStatus?.(s.status);
     if (s.status === "completed") {
       const img = s.images?.[0]?.url;

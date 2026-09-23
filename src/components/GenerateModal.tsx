@@ -36,7 +36,7 @@ function bodyFor(m: FeedModel, prompt: string, opts: Record<string, string>): Re
 
 export type Generated = { url: string; kind: "image" | "video"; name: string; model: string };
 
-type Props = { open: boolean; onClose: () => void; onAdd: (g: Generated) => void; onLib: (g: Generated) => void };
+type Props = { open: boolean; initialPrompt?: string; onClose: () => void; onAdd: (g: Generated) => void; onLib: (g: Generated) => void };
 
 function optionValues(model: FeedModel | null): Record<string, string> {
   return Object.fromEntries((model ? paramsFor(model) : []).map((param) => [param.key, param.options[0]]));
@@ -48,7 +48,7 @@ function demoResult(model: FeedModel, prompt: string): Generated | null {
   return { url, kind: model.type === "video" ? "video" : "image", name: prompt.slice(0, 40) || model.title, model: model.title };
 }
 
-export default function GenerateModal({ open, onClose, onAdd, onLib }: Props) {
+export default function GenerateModal({ open, initialPrompt = "", onClose, onAdd, onLib }: Props) {
   const [models, setModels] = useState<FeedModel[]>([]);
   const [mState, setMState] = useState<"loading" | "ready" | "error">("loading");
   const [tab, setTab] = useState<Tab>("all");
@@ -60,6 +60,9 @@ export default function GenerateModal({ open, onClose, onAdd, onLib }: Props) {
   const [result, setResult] = useState<Generated | null>(null);
   const [err, setErr] = useState("");
 
+  useEffect(() => {
+    if (open) setPrompt(initialPrompt);
+  }, [open, initialPrompt]);
   useEffect(() => {
     if (!open) return;
     let alive = true;
@@ -136,7 +139,7 @@ export default function GenerateModal({ open, onClose, onAdd, onLib }: Props) {
           </div>
           <label className="gen-prompt-focused"><span className="gen-section-label">Direction</span><textarea rows={4} maxLength={500} placeholder={sel ? `Describe what ${sel.title} should make…` : "Choose a model first"} value={prompt} onChange={(event) => setPrompt(event.target.value)} /></label>
           {sel && paramsFor(sel).length > 0 && <div className="gen-params gen-params-focused">{paramsFor(sel).map((param) => <div className="gen-param" key={param.key}><span>{param.label}</span><div className="gen-seg">{param.options.map((option) => <button key={option} className={`gen-btn-s${(opts[param.key] ?? param.options[0]) === option ? " on" : ""}`} onClick={() => setOpts((current) => ({ ...current, [param.key]: option }))}>{option}</button>)}</div></div>)}</div>}
-          {!hasKeys && <div className="gen-preview-note">Preview mode is on. Add your Higgsfield key when you want live generation.</div>}
+          {!hasKeys && <div className="gen-preview-note">Preview mode is on. Live generation needs Higgsfield credentials configured on the server.</div>}
           {phase === "working" && <div className="gen-status"><span className="ring small" />{status} — preparing your asset</div>}
           {phase === "error" && <div className="gen-status err">{err}</div>}
           <footer className="gen-foot gen-foot-focused"><span className="gen-price">{sel?.price ? `Estimated $${sel.price}/${sel.priceUnit ?? ""}` : "Price shown before live generation"}</span><button className="gen-go" onClick={() => void run()} disabled={!sel || !prompt.trim() || phase === "working"}>{phase === "working" ? "Working…" : hasKeys ? "Generate" : "Preview"}</button></footer>

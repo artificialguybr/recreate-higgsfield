@@ -8,7 +8,7 @@ import { useFeed } from "../lib/hf";
 import GenerateModal, { Generated } from "../components/GenerateModal";
 import ChatPanel from "../components/ChatPanel";
 import { ChatCtx } from "../lib/editorChat";
-import { upsertWorkspaceArtifact } from "../lib/workspace";
+import { activeWorkspaceProjectId, upsertWorkspaceArtifact } from "../lib/workspace";
 
 const FPS = 30;
 const PX0 = 72;
@@ -107,26 +107,18 @@ const patchClip = (cs: Clip[], id: string, p: Partial<Clip>) =>
   cs.map((x) => (x.id === id ? { ...x, ...p } : x));
 
 export default function Editor() {
+  const projectSaveKey = `${SAVE_KEY}:${activeWorkspaceProjectId()}`;
   const [clips, setClips] = useState<Clip[]>([]);
   const [t, setT] = useState(0);
   const [playing, setPlaying] = useState(false);
   const [sel, setSel] = useState<string | null>(null);
   const [chatOpen, setChatOpen] = useState(false);
   const [genOpen, setGenOpen] = useState(false);
+  const [genPrompt, setGenPrompt] = useState("");
   const [busy, setBusy] = useState(false);
   const [lib, setLib] = useState<Generated[]>([]);
   const LIB_KEY = "field-editor-library";
   const libLoaded = useRef(false);
-  useEffect(() => {
-    upsertWorkspaceArtifact({
-      id: "editor",
-      tool: "editor",
-      title: "Editor",
-      summary: "Your shared timeline is ready for the next handoff.",
-      route: "/editor",
-      status: "active",
-    });
-  }, []);
   // Load the asset library once; remote URLs survive a refresh.
   useEffect(() => {
     if (libLoaded.current) return;
@@ -167,6 +159,16 @@ export default function Editor() {
   const [res, setRes] = useState<Res>("720");
   const [ratio, setRatio] = useState<Ratio>("16:9");
   const [name, setName] = useState("Untitled");
+  useEffect(() => {
+    upsertWorkspaceArtifact({
+      id: "editor",
+      tool: "editor",
+      title: name || "Untitled",
+      summary: clips.length ? `${clips.length} clips · ${fmt(totalDur(clips))} timeline` : "No clips in the timeline yet.",
+      route: "/editor",
+      status: clips.length ? "ready" : "empty",
+    });
+  }, [clips, name]);
   const [muted, setMuted] = useState(true);
   const [drag, setDrag] = useState<null | "live" | "moved">(null);
   const sources = useRef(new Map<string, Source>());
@@ -178,43 +180,45 @@ export default function Editor() {
   // they restore from the timeline position, not from history.
   const hist = useRef<{ past: Clip[][]; future: Clip[][] }>({ past: [], future: [] });
   const lastEdit = useRef(0);
-  const commit = (next: Clip[], coalesce = false) => {
-    const now = Date.now();
-    if (coalesce && now - lastEdit.current < 800) return setClips(next);
-    lastEdit.current = now;
-    hist.current.past.push(clips);
-    if (hist.current.past.length > 50) hist.current.past.shift();
-    hist.current.future = [];
+  const clipsRef = useRef(clips);
+  const setTimeline = (next: Clip[]) => {
+    clipsRef.current = next;
     setClips(next);
   };
+  const commit = (next: Clip[], coalesce = false) => {
+    const now = Date.now();
+    if (coalesce && now - lastEdit.current < 800) {
+      setTimeline(next);
+      return;
+    }
+    lastEdit.current = now;
+    hist.current.past.push(clipsRef.current);
+    if (hist.current.past.length > 50) hist.current.past.shift();
+    hist.current.future = [];
+    setTimeline(next);
+  };
   const commitFn = (fn: (cs: Clip[]) => Clip[], coalesce = false) => {
-    setClips((cs) => {
-      const now = Date.now();
-      if (!coalesce || now - lastEdit.current > 800) {
-        hist.current.past.push(cs);
-        if (hist.current.past.length > 50) hist.current.past.shift();
-        hist.current.future = [];
-      }
-      lastEdit.current = now;
-      return fn(cs);
-    });
+    const now = Date.now();
+    if (!coalesce || now - lastEdit.current > 800) {
+      hist.current.past.push(clipsRef.current);
+      if (hist.current.past.length > 50) hist.current.past.shift();
+      hist.current.future = [];
+    }
+    lastEdit.current = now;
+    setTimeline(fn(clipsRef.current));
   };
   const undo = () => {
-    const p = hist.current.past.pop();
-    if (!p) return;
-    setClips((cs) => {
-      hist.current.future.push(cs);
-      return p;
-    });
+    const previous = hist.current.past.pop();
+    if (!previous) return;
+    hist.current.future.push(clipsRef.current);
+    setTimeline(previous);
     flash("Undone");
   };
   const redo = () => {
-    const f = hist.current.future.pop();
-    if (!f) return;
-    setClips((cs) => {
-      hist.current.past.push(cs);
-      return f;
-    });
+    const next = hist.current.future.pop();
+    if (!next) return;
+    hist.current.past.push(clipsRef.current);
+    setTimeline(next);
     flash("Redone");
   };
   // The chat dispatches undo as an event so it never captures a stale closure.
@@ -287,13 +291,13 @@ export default function Editor() {
     window.clearTimeout(saveTimer.current);
     saveTimer.current = window.setTimeout(() => {
       try {
-        localStorage.setItem(SAVE_KEY, JSON.stringify({ clips, t, name }));
+        localStorage.setItem(projectSaveKey, JSON.stringify({ clips, t, name }));
       } catch {
         /* storage full — skip */
       }
     }, 500);
     return () => window.clearTimeout(saveTimer.current);
-  }, [clips, t, name]);
+  }, [clips, t, name, projectSaveKey]);
 
   // Restore the saved sequence, or ingest "Editor" handoff from a result card.
   const boot = useRef(false);
@@ -301,7 +305,7 @@ export default function Editor() {
     if (boot.current) return;
     boot.current = true;
     try {
-      const raw = localStorage.getItem(SAVE_KEY);
+      const raw = localStorage.getItem(projectSaveKey) ?? (activeWorkspaceProjectId() === "project-default" ? localStorage.getItem(SAVE_KEY) : null);
       if (raw) {
         const saved = JSON.parse(raw) as { clips?: Clip[]; t?: number; name?: string };
         const cs = (saved.clips ?? []).filter((c) => !c.src.startsWith("blob:"));
@@ -309,7 +313,7 @@ export default function Editor() {
           cs.forEach((c) => {
             if (!sources.current.has(c.id)) sources.current.set(c.id, { url: c.src });
           });
-          setClips(cs);
+          setTimeline(cs);
           if (saved.name) setName(saved.name);
           setT(Math.min(saved.t ?? 0, totalDur(cs)));
         }
@@ -323,25 +327,39 @@ export default function Editor() {
     const s: Source = { url: proxyMedia(p.url) };
     if (p.kind === "image") addImage(s, "generated");
     else void addVideo(s, "generated");
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
-
   // Capture a thumbnail for new video clips so the timeline shows the shot, not a block.
   useEffect(() => {
     if (!current || current.kind !== "video" || current.thumb) return;
     let alive = true;
     void videoThumb(current.src).then((th) => {
       if (!alive || !th) return;
-      setClips((cs) => cs.map((x) => (x.id === current.id ? { ...x, thumb: th } : x)));
+      setTimeline(clipsRef.current.map((clip) => clip.id === current.id ? { ...clip, thumb: th } : clip));
     });
     return () => {
       alive = false;
     };
-  }, [current?.id]); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [current?.id, current?.src]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const flash = (msg: string) => {
     setToast(msg);
     setTimeout(() => setToast(""), 2200);
+  };
+  const replaceSelectedFromLibrary = async (asset: Generated) => {
+    const target = selected;
+    if (!target || target.kind !== asset.kind) return;
+    const source: Source = { url: proxyMedia(asset.url) };
+    const id = crypto.randomUUID();
+    let replacement: Clip = { ...target, id, src: source.url, name: asset.name, thumb: undefined };
+    if (asset.kind === "video") {
+      const duration = await videoDuration(source.url);
+      const start = Math.min(target.in, Math.max(0, duration - 0.2));
+      replacement = { ...replacement, dur: duration, in: start, out: Math.max(start + 0.2, Math.min(target.out, duration)) };
+    }
+    sources.current.set(id, source);
+    commitFn((cs) => cs.map((clip) => clip.id === target.id ? replacement : clip));
+    setSel(id);
+    flash("Replaced source");
   };
 
   const addVideo = async (s: Source, nm: string) => {
@@ -584,7 +602,10 @@ export default function Editor() {
     playhead: () => t,
     rename: (nm) => setName(nm),
     export: () => void doExport(),
-    generate: () => setGenOpen(true),
+    generate: (prompt) => {
+      setGenPrompt(prompt);
+      setGenOpen(true);
+    },
     status: () => ({ n: clips.length, dur, name, res, ratio }),
   };
 
@@ -733,7 +754,7 @@ export default function Editor() {
           <button className={`chip${chatOpen ? " on" : ""}`} onClick={() => setChatOpen((o) => !o)} aria-label="Toggle editor chat">
             <Chat size={13} /> Chat
           </button>
-          <button className="chip gen-chip" onClick={() => setGenOpen(true)}>
+          <button className="chip gen-chip" onClick={() => { setGenPrompt(""); setGenOpen(true); }}>
             <Spark size={13} /> Generate
           </button>
           <button className="chip" onClick={newProject} disabled={!clips.length} aria-label="New project">
@@ -816,6 +837,18 @@ export default function Editor() {
                   onChange={(e) => patch(selected.id, { out: Math.max(selected.in + 0.2, Number(e.target.value) || selected.in + 0.2) })} />
               </div>
               <div className="prop-row"><span>Length</span><span>{clipLen(selected).toFixed(1)}s</span></div>
+              {lib.some((asset) => asset.kind === selected.kind) && (
+                <div className="prop-row col">
+                  <span>Replace source</span>
+                  <select className="prop-txt" aria-label="Replace selected clip source" value="" onChange={(event) => {
+                    const asset = lib.find((item) => item.url === event.target.value);
+                    if (asset) void replaceSelectedFromLibrary(asset);
+                  }}>
+                    <option value="">Choose from library</option>
+                    {lib.filter((asset) => asset.kind === selected.kind).map((asset) => <option key={asset.url} value={asset.url}>{asset.name}</option>)}
+                  </select>
+                </div>
+              )}
 
               <div className="ed-cats-t" style={{ marginTop: 6 }}>Look</div>
               {selected.kind === "video" && (
@@ -977,6 +1010,7 @@ export default function Editor() {
 
       <GenerateModal
         open={genOpen}
+        initialPrompt={genPrompt}
         onClose={() => setGenOpen(false)}
         onAdd={(g) => libToTimeline(g)}
         onLib={(g) => {
