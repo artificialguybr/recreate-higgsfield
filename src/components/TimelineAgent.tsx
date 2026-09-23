@@ -164,7 +164,7 @@ function estimate(model: FeedModel | undefined, proposal: Proposal) {
 function extractPrompt(text: string) {
   return text.replace(/^\s*(?:(?:please|por favor)\s+)?(?:(?:i\s+)?(?:need|want|would like)|preciso(?:\s+de)?|quero|(?:make|create|generate|produce|gerar|gere|criar|crie|fazer|faz|produzir|produza))\s+(?:me\s+)?(?:(?:a|an|the|um|uma|o|a)\s+)?(?:video|vídeo|clip|clipe|footage|shot|animation|filme|image|imagem|picture|photo|foto|illustration|still)\s*(?:of|showing|about|de|com|sobre)?\s*/i, "").trim() || text;
 }
-export default function TimelineAgent({ showPreview = true }: { showPreview?: boolean }) {
+export default function TimelineAgent({ showPreview = true, exportRequest }: { showPreview?: boolean; exportRequest?: () => void }) {
   const navigate = useNavigate();
   const location = useLocation();
   const mockup = new URLSearchParams(location.search).get("mockup") === "1";
@@ -316,7 +316,7 @@ export default function TimelineAgent({ showPreview = true }: { showPreview?: bo
     add: addClip,
     library: () => assets.map((asset) => ({ url: assetObjectUrl(asset), kind: asset.kind, name: asset.name })),
     seek, totalDur: () => totalDur(saveRef.current.clips), playhead: () => saveRef.current.t, rename: (name) => persist({ ...saveRef.current, name }),
-    export: () => "Open the Editor to export this cut; rendering progress appears there.",
+    export: () => exportRequest ? (void exportRequest(), "Exporting — watch the progress in the Editor top bar.") : "Open the Editor to export this cut; rendering progress appears there.",
     generate: (prompt) => navigate("/image", { state: { workspacePrompt: prompt } }),
     status: () => ({ n: saveRef.current.clips.length, dur: totalDur(saveRef.current.clips), name: saveRef.current.name, res: "720", ratio: "16:9" }),
   };

@@ -9,7 +9,9 @@ export type ConnectedInput = { input: WorkflowPort; output: WorkflowPort; artifa
 export type WorkflowEdge = Edge | WorkspaceConnection;
 
 export const MOTION_CONTROL_MODE = "kling-video/v3/motion-control/std";
-export const MOTION_TRANSFER_MODE = "higgsfiled/genjutsu/motion-transfer/v1.0";
+ export const MOTION_TRANSFER_MODE = "higgsfiled/genjutsu/motion-transfer/v1.0";
+export const AUDIO_MODE = "field/audio/seed-1";
+export const THREE_MODE = "field/3d";
 export const MARKETING_IMAGE_MODE = "marketing-studio/image";
 
 export const PORT_COLORS: Record<PortType, string> = {
@@ -34,8 +36,8 @@ export function inputPortsFor(artifact: WorkspaceArtifact): WorkflowPort[] {
     case "video": return [prompt];
     case "motion-control": return [prompt, { ...image, id: "character", label: "Character" }, { ...video, id: "motion", label: "Motion" }];
     case "motion-transfer": return [prompt, { ...image, id: "references", label: "Reference images", multiple: true, limit: 8 }, { ...video, id: "motion", label: "Motion video" }];
-    case "audio": return [prompt];
-    case "3d": return [prompt, image, model3d];
+     case "audio": return [prompt];
+    case "3d": return [prompt];
     case "chat":
     case "launch": return [prompt];
     case "studio": return [prompt, image, video];
@@ -225,8 +227,17 @@ export function generationPlan(artifact: WorkspaceArtifact, inputs: ConnectedInp
       mode: artifact.model && !artifact.model.includes("/image") ? artifact.model : MOTION_TRANSFER_MODE,
       prompt,
       body: { prompt, video_url: motion[0], image_urls: references, resolution: artifact.resolution || "720p" },
-    };
+  };
+
   }
 
+  if (artifact.tool === "audio") {
+    if (!prompt) return { error: "Add a prompt or connect a text input." };
+    return { mode: artifact.model || AUDIO_MODE, prompt, body: { prompt } };
+  }
+  if (artifact.tool === "3d") {
+    if (!prompt) return { error: "Add a prompt or connect a text input." };
+    return { mode: artifact.model || THREE_MODE, prompt, body: { prompt, resolution: artifact.resolution || "1080p", mesh_quality: (artifact.parameters?.mesh_quality as string) || "high" } };
+  }
   return { error: "This node has no live Higgsfield model." };
 }

@@ -1060,7 +1060,7 @@ export default function Editor() {
           )}
 
         </div>
-        {chatOpen && <aside className="ed-chat-pane" aria-label="Editor chat"><TimelineAgent showPreview={false} /></aside>}
+        {chatOpen && <aside className="ed-chat-pane" aria-label="Editor chat"><TimelineAgent showPreview={false} exportRequest={doExport} /></aside>}
         {genOpen && <aside className="ed-generate-pane" aria-label="Generate asset"><GenerateModal
           open={genOpen}
           variant="panel"

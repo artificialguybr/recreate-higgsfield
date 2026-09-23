@@ -20,7 +20,7 @@ import {
 
 import {
   connectionFits, connectionPorts, connectedInputsFor, generationPlan, handleId,
-  inputPortsFor, normalizeConnections, MARKETING_IMAGE_MODE, outputPortsFor, promptForNode,
+  inputPortsFor, normalizeConnections, AUDIO_MODE, MARKETING_IMAGE_MODE, outputPortsFor, promptForNode, THREE_MODE,
   NODE_COLORS, PORT_COLORS, type ConnectedInput, type WorkflowPort,
 } from "../lib/workflowPorts";
 import { bestFile, searchStock, stockConfigured, type StockClip } from "../lib/pexels";
@@ -197,11 +197,10 @@ function ArtifactNode({ data, selected }: NodeProps<WorkspaceNode>) {
   const inputs = artifact.inputs ?? [];
   const inheritedPrompt = promptForNode(artifact, inputs);
   const prompt = artifact.prompt ?? "";
-  const isGenerator = artifact.tool === "image" || artifact.tool === "video" || artifact.tool === "motion-control" || artifact.tool === "motion-transfer";
-  const isUnsupported = artifact.tool === "audio" || artifact.tool === "3d";
+  const isGenerator = artifact.tool === "image" || artifact.tool === "video" || artifact.tool === "motion-control" || artifact.tool === "motion-transfer" || artifact.tool === "audio" || artifact.tool === "3d";
   const generation = isGenerator ? generationPlan(artifact, inputs) : null;
   const canGenerate = Boolean(generation && !("error" in generation));
-  const generatorMode = artifact.tool === "image" ? artifact.model || MARKETING_IMAGE_MODE : artifact.tool === "video" ? artifact.model || VIDEO_MODE : "";
+  const generatorMode = artifact.tool === "image" ? artifact.model || MARKETING_IMAGE_MODE : artifact.tool === "video" ? artifact.model || VIDEO_MODE : artifact.tool === "audio" ? artifact.model || AUDIO_MODE : artifact.tool === "3d" ? artifact.model || THREE_MODE : "";
   const generatorSchema = generatorMode && (artifact.tool === "image" || artifact.tool === "video") ? modelSchema({ mode: generatorMode, type: artifact.tool }) : null;
   const generatorParameters = artifact.parameters ?? defaultsForModel(generatorSchema ? { mode: generatorMode, type: generatorSchema.kind } : null);
   return (
@@ -244,7 +243,7 @@ function ArtifactNode({ data, selected }: NodeProps<WorkspaceNode>) {
       {artifact.tool === "editor" && <><p>{artifact.summary}</p><InputAssets inputs={inputs} onSendEditor={artifact.onSendEditor} /><button className="workspace-node-open" onClick={() => artifact.onOpen?.(artifact.route)}>Open Editor <ArrowRight size={13} /></button></>}
       {artifact.tool === "export" && <><p>{artifact.summary}</p><InputAssets inputs={inputs} /><button className="workspace-node-open" onClick={() => artifact.onOpen?.(artifact.route)}>Open Editor <ArrowRight size={13} /></button></>}
       {artifact.tool === "gallery" && <><p>{artifact.summary}</p><span className="workflow-node-hint">Image and video assets from the shared local library.</span></>}
-      {!isGenerator && !isUnsupported && artifact.tool !== "brief" && artifact.tool !== "chat" && artifact.tool !== "editor" && artifact.tool !== "export" && artifact.tool !== "gallery" && <><p>{artifact.summary}</p><InputAssets inputs={inputs} /><OutputAsset artifact={artifact} /><button className="workspace-node-open" onClick={() => artifact.onOpen?.(artifact.route, inheritedPrompt)}>Open {artifact.title} <ArrowRight size={13} /></button></>}
+      {!isGenerator && artifact.tool !== "brief" && artifact.tool !== "chat" && artifact.tool !== "editor" && artifact.tool !== "export" && artifact.tool !== "gallery" && <><p>{artifact.summary}</p><InputAssets inputs={inputs} /><OutputAsset artifact={artifact} /><button className="workspace-node-open" onClick={() => artifact.onOpen?.(artifact.route, inheritedPrompt)}>Open {artifact.title} <ArrowRight size={13} /></button></>}
       <PortRows direction="out" ports={outputPortsFor(artifact) ?? []} />
     </div>
   );
@@ -621,7 +620,7 @@ export default function Workspace() {
       const inputs = connectedInputsFor(artifact, edges, renderArtifacts);
       return nodeFromArtifact({ ...artifact, assetSaveError: assetSaveErrors[artifact.id] }, {
         onOpen: openArtifact, onOpenGallery: openGallery, onPatch: patchArtifact, onGenerate: runGeneration, onSendEditor: sendToEditor, onDetails: openDetails,
-        onSearchStock: searchStockFor, onPickStock: pickStock, stockResults, stockBusy, stockError,
+        onSearchStock: searchStockFor, onPickStock: pickStock, stockResults, stockBusy, stockError, noKeys: !hasKeys,
       }, inputs, positions[artifact.id], artifact.id === selectedId);
     }));
   }, [artifacts, assets, assetSaveErrors, edges, openArtifact, openDetails, openGallery, patchArtifact, requestStatus, runningId, selectedId, sendToEditor, setNodes, stockResults, stockBusy, stockError]);

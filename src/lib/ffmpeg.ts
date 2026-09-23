@@ -42,7 +42,7 @@ type Source = { url: string; blob?: Blob };
 async function toBlob(src: Source | undefined): Promise<Blob> {
   if (!src) throw new Error("Clip source is missing");
   if (src.blob) return src.blob;
-  const res = await fetch(src.url);
+  const res = await fetch(src.url.startsWith("https://d28lhcrx5qdowv.cloudfront.net") ? "/hfblob" + src.url.slice(37) : src.url);
   if (!res.ok) throw new Error(`Media fetch failed: ${res.status}`);
   return res.blob();
 }
