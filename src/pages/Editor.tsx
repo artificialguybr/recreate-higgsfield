@@ -328,6 +328,37 @@ export default function Editor() {
     if (p.kind === "image") addImage(s, "generated");
     else void addVideo(s, "generated");
   }, []);
+  // Chat on another route/tab writes the same project-scoped timeline.
+  useEffect(() => {
+    const applyExternal = (value: unknown) => {
+      const saved = value as { clips?: Clip[]; t?: number; name?: string };
+      if (!Array.isArray(saved?.clips)) return;
+      const next = saved.clips.filter((clip) => clip && typeof clip.src === "string" && !clip.src.startsWith("blob:"));
+      hist.current.past.push(clipsRef.current);
+      if (hist.current.past.length > 50) hist.current.past.shift();
+      hist.current.future = [];
+      next.forEach((clip) => {
+        if (!sources.current.has(clip.id)) sources.current.set(clip.id, { url: clip.src });
+      });
+      setTimeline(next);
+      setName(saved.name || "Untitled");
+      setT(Math.min(saved.t ?? 0, totalDur(next)));
+      setSel(null);
+      setPlaying(false);
+      flash("Updated from Chat");
+    };
+    const onBridge = (event: Event) => applyExternal((event as CustomEvent<unknown>).detail);
+    const onStorage = (event: StorageEvent) => {
+      if (event.key !== projectSaveKey || !event.newValue) return;
+      try { applyExternal(JSON.parse(event.newValue)); } catch { /* Ignore invalid external state. */ }
+    };
+    window.addEventListener("field-editor-timeline", onBridge);
+    window.addEventListener("storage", onStorage);
+    return () => {
+      window.removeEventListener("field-editor-timeline", onBridge);
+      window.removeEventListener("storage", onStorage);
+    };
+  }, [projectSaveKey]);
   // Capture a thumbnail for new video clips so the timeline shows the shot, not a block.
   useEffect(() => {
     if (!current || current.kind !== "video" || current.thumb) return;

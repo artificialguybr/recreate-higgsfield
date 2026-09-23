@@ -18,7 +18,7 @@ export type ChatCtx = {
   totalDur: () => number;
   playhead: () => number;
   rename: (name: string) => void;
-  export: () => void;
+  export: () => void | string;
   generate: (prompt: string) => void;
   status: () => { n: number; dur: number; name: string; res: string; ratio: string };
 };
@@ -55,8 +55,8 @@ export function chatCommand(raw: string, ctx: ChatCtx): ChatOut {
   if (text === "help" || text === "?") return { reply: HELP };
   if (/^(export|render|render it|make the mp4|finish)\b/.test(text)) {
     if (!ctx.clipsCount()) return needClip("Nothing to export yet — add clips first.");
-    ctx.export();
-    return { reply: "Exporting now — watch the progress in the top bar.", followups: ["status"] };
+    const response = ctx.export();
+    return { reply: typeof response === "string" ? response : "Exporting now — watch the progress in the top bar.", followups: ["status"] };
   }
   if (/^(clear|empty|new project|reset project)\b/.test(text)) {
     if (!ctx.clipsCount()) return { reply: "Already empty." };

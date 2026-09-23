@@ -185,19 +185,53 @@ function ArtifactDetailsModal({ artifact, onClose, onSave, onSendEditor, saving,
   </div>;
 }
 
-function FitOnResize({ selectedId, nodeCount }: { selectedId: string; nodeCount: number }) {
-  const { fitView, getNode } = useReactFlow<WorkspaceNode>();
+function FitOnResize({ selectedId, nodeCount, layoutKey }: { selectedId: string; nodeCount: number; layoutKey: string }) {
+  const { fitView, getNode, getNodes, setNodes } = useReactFlow<WorkspaceNode>();
   useEffect(() => {
-    const fit = () => requestAnimationFrame(() => {
+    const fit = () => {
       if (window.innerWidth <= 768) {
         const selected = getNode(selectedId);
-        fitView({ nodes: selected ? [selected] : undefined, padding: 0.25, minZoom: 0.7, maxZoom: 1 });
-      } else fitView({ padding: 0.02, minZoom: 0.25, maxZoom: 1.35 });
+        fitView({ nodes: selected ? [selected] : undefined, padding: 0.18, minZoom: 0.45, maxZoom: 1 });
+      } else fitView({ padding: 0.12, minZoom: 0.25, maxZoom: 1.35 });
+    };
+    const frame = requestAnimationFrame(() => {
+      const nodes = getNodes();
+      const placed: { x: number; y: number; w: number; h: number }[] = [];
+      const positions = new Map<string, { x: number; y: number }>();
+      const ordered = [...nodes].sort((a, b) => a.position.x - b.position.x || a.position.y - b.position.y);
+      for (const node of ordered) {
+        const w = node.measured?.width ?? 258;
+        const floor = node.data.outputUrl
+          ? node.data.tool === "image" ? 500 : node.data.tool === "chat" ? 390 : 360
+          : node.data.tool === "image" || node.data.tool === "chat" ? 360 : node.data.tool === "video" ? 320 : 250;
+        const h = Math.max(node.measured?.height ?? 0, floor);
+        let y = node.position.y;
+        let collisions = placed.filter((item) => node.position.x < item.x + item.w + 24 && node.position.x + w + 24 > item.x && y < item.y + item.h + 32 && y + h + 32 > item.y);
+        while (collisions.length) {
+          y = Math.max(...collisions.map((item) => item.y + item.h + 40));
+          collisions = placed.filter((item) => node.position.x < item.x + item.w + 24 && node.position.x + w + 24 > item.x && y < item.y + item.h + 32 && y + h + 32 > item.y);
+        }
+        positions.set(node.id, { x: node.position.x, y });
+        placed.push({ x: node.position.x, y, w, h });
+      }
+      const next = nodes.map((node) => ({ ...node, position: positions.get(node.id)! }));
+      if (next.some((node, index) => node.position.y !== nodes[index]!.position.y)) {
+        setNodes(next);
+        requestAnimationFrame(fit);
+      } else fit();
     });
-    fit();
-    window.addEventListener("resize", fit);
-    return () => window.removeEventListener("resize", fit);
-  }, [fitView, getNode, nodeCount, selectedId]);
+    let resizeFrame = 0;
+    const handleResize = () => {
+      cancelAnimationFrame(resizeFrame);
+      resizeFrame = requestAnimationFrame(fit);
+    };
+    window.addEventListener("resize", handleResize);
+    return () => {
+      cancelAnimationFrame(frame);
+      cancelAnimationFrame(resizeFrame);
+      window.removeEventListener("resize", handleResize);
+    };
+  }, [fitView, getNode, getNodes, layoutKey, nodeCount, selectedId, setNodes]);
   return null;
 }
 
@@ -378,7 +412,7 @@ export default function Workspace() {
       <section className="workspace-canvas" aria-label="Project flow canvas">
         <div className="workspace-canvas-head"><span>Flow · connect nodes manually</span><button className="workspace-add-trigger" onClick={() => setAddOpen((open) => !open)}><Plus size={14} /> Add to flow</button></div>
         {addOpen && <div className="workspace-add-popover"><div className="workspace-inspector-label">Choose a step</div><div className="workspace-tool-list">{TOOLS.map((tool) => <button key={tool.tool} onClick={() => addTool(tool)}><span>{iconForTool(tool.tool)}</span><span><b>{tool.title}</b><small>{tool.description}</small></span><Plus size={14} /></button>)}</div></div>}
-        <div className="workspace-flow"><ReactFlow nodes={nodes} edges={edges} nodeTypes={nodeTypes} onNodesChange={onNodesChange} onEdgesChange={onEdgesChange} onConnect={handleConnect} isValidConnection={isValidConnection} onNodeClick={(_, node) => setSelectedId(node.id)} fitView fitViewOptions={{ padding: 0.14 }} minZoom={0.25} maxZoom={1.35} colorMode="light"><Background gap={24} size={1} color="#d9ddd4" /><Controls showInteractive={false} /><FitOnResize selectedId={selectedId} nodeCount={nodes.length} /></ReactFlow></div>
+        <div className="workspace-flow"><ReactFlow nodes={nodes} edges={edges} nodeTypes={nodeTypes} onNodesChange={onNodesChange} onEdgesChange={onEdgesChange} onConnect={handleConnect} isValidConnection={isValidConnection} onNodeClick={(_, node) => setSelectedId(node.id)} fitView fitViewOptions={{ padding: 0.14 }} minZoom={0.25} maxZoom={1.35} colorMode="light"><Background gap={24} size={1} color="#d9ddd4" /><Controls showInteractive={false} /><FitOnResize selectedId={selectedId} nodeCount={nodes.length} layoutKey={artifacts.map((artifact) => `${artifact.id}:${artifact.status}:${artifact.outputUrl ?? ""}`).join("|")} /></ReactFlow></div>
       </section>
       {detailArtifact && <ArtifactDetailsModal artifact={{ ...detailArtifact, inputs: detailInputs }} onClose={closeDetails} onSave={() => saveOutput(detailArtifact)} onSendEditor={sendToEditor} saving={saving} error={saveError} />}
     </div></div>

@@ -13,6 +13,7 @@ import {
 } from "../lib/hf";
 import { setPending } from "../lib/transfer";
 import { activeWorkspaceProjectId, upsertWorkspaceArtifact } from "../lib/workspace";
+import TimelineAgent from "../components/TimelineAgent";
 
 type Mode = "image" | "video";
 type Media = { url: string; kind: "image" | "video"; title: string; note?: "catalog" };
@@ -40,6 +41,7 @@ export default function Supercomputer() {
     }
   });
   const [busy, setBusy] = useState(false);
+  const [surface, setSurface] = useState<"create" | "edit">("create");
   const [val, setVal] = useState("");
   const [model, setModel] = useState<Mode>("image");
   const [sugs, setSugs] = useState<FeedModel[]>([]);
@@ -175,6 +177,11 @@ export default function Supercomputer() {
         </div>
       </aside>
       <div className="studio-canvas">
+        <div className="chat-mode-tabs" role="tablist" aria-label="Chat workspace">
+          <button role="tab" aria-selected={surface === "create"} className={surface === "create" ? "on" : ""} onClick={() => setSurface("create")}>Create</button>
+          <button role="tab" aria-selected={surface === "edit"} className={surface === "edit" ? "on" : ""} onClick={() => setSurface("edit")}>Edit timeline</button>
+        </div>
+        {surface === "edit" ? <TimelineAgent /> : (
         <div className="chat-wrap">
           <div className={`c2-main${msgs.length ? " has-thread" : ""}`}>
             {msgs.length === 0 ? (
@@ -287,6 +294,7 @@ export default function Supercomputer() {
             </div>
           </div>
         </div>
+        )}
       </div>
     </div>
   );
