@@ -75,6 +75,9 @@ export interface LaunchframePlanInput {
   founderVideoBase64?: string;
   founderVoiceBase64?: string;
   logoBase64?: string;
+  founderVideoMime?: string;
+  founderVoiceMime?: string;
+  logoMime?: string;
   consent: boolean;
 }
 

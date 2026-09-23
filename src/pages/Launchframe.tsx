@@ -218,6 +218,12 @@ export default function Launchframe() {
       setError("Narrated demos need founder video, founder voice, and consent.");
       return;
     }
+    for (const [file, label, maxMB] of [[founderVideo, "Founder video", 25], [founderVoice, "Founder voice", 12], [logo, "Logo", 4]] as const) {
+      if (file && file.size > maxMB * 1024 * 1024) {
+        setError(`${label} must be ${maxMB} MB or smaller.`);
+        return;
+      }
+    }
     setBusy(true);
     try {
       const [founderVideoBase64, founderVoiceBase64, logoBase64] = await Promise.all([
@@ -233,6 +239,9 @@ export default function Launchframe() {
         founderVideoBase64,
         founderVoiceBase64,
         logoBase64,
+        founderVideoMime: founderVideo?.type,
+        founderVoiceMime: founderVoice?.type,
+        logoMime: logo?.type,
         consent,
       });
       setWorkflow(next);

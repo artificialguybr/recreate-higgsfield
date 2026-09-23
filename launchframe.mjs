@@ -7,13 +7,18 @@
 
 import { spawn } from "node:child_process";
 import { promises as fs } from "node:fs";
-import { createHash } from "node:crypto";
+import { createHash, randomBytes } from "node:crypto";
+import { lookup as dnsLookup } from "node:dns/promises";
+import { request as httpRequest } from "node:http";
 import { request as httpsRequest } from "node:https";
+import { BlockList, isIP } from "node:net";
 import { fileURLToPath } from "node:url";
-import { join, dirname } from "node:path";
+import { homedir } from "node:os";
+import { join, dirname, resolve } from "node:path";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
-const DATA_DIR = join(HERE, "launchframe-data");
+const LEGACY_DATA_DIR = join(HERE, "launchframe-data");
+const DATA_DIR = resolve(process.env.FIELD_DATA_DIR || join(homedir(), ".recreate-higgsfield", "launchframe-data"));
 
 const VIDEO_SHAPES = {
   A: ["capture", "generate", "capture", "generate"],
@@ -22,6 +27,20 @@ const VIDEO_SHAPES = {
 };
 const CLIP_MODE = "kling-video/v3.0/std/text-to-video";
 const KLANG_PRICE = 0.21; // per 5s clip, catalog price
+const MAX_BODY_BYTES = 64 * 1024 * 1024;
+const UPLOAD_LIMITS = {
+  founderVideoBase64: { stem: "founder-video", max: 25 * 1024 * 1024, types: { "video/mp4": "mp4", "video/webm": "webm", "video/quicktime": "mov" } },
+  founderVoiceBase64: { stem: "founder-voice", max: 12 * 1024 * 1024, types: { "audio/mpeg": "mp3", "audio/mp4": "m4a", "audio/x-m4a": "m4a", "audio/wav": "wav", "audio/x-wav": "wav", "audio/ogg": "ogg", "audio/webm": "webm" } },
+  logoBase64: { stem: "logo", max: 4 * 1024 * 1024, types: { "image/png": "png", "image/jpeg": "jpg", "image/webp": "webp" } },
+};
+const blockedAddresses = new BlockList();
+for (const [subnet, prefix] of [["0.0.0.0", 8], ["10.0.0.0", 8], ["100.64.0.0", 10], ["127.0.0.0", 8], ["169.254.0.0", 16], ["172.16.0.0", 12], ["192.0.0.0", 24], ["192.0.2.0", 24], ["192.168.0.0", 16], ["198.18.0.0", 15], ["198.51.100.0", 24], ["203.0.113.0", 24], ["224.0.0.0", 4], ["240.0.0.0", 4]]) blockedAddresses.addSubnet(subnet, prefix, "ipv4");
+const globalIpv6 = new BlockList();
+globalIpv6.addSubnet("2000::", 3, "ipv6");
+
+function isPublicAddress(address, family) {
+  return family === 4 ? !blockedAddresses.check(address, "ipv4") : globalIpv6.check(address, "ipv6") && !blockedAddresses.check(address, "ipv6");
+}
 
 /* ---------------- Higgsfield client ---------------- */
 
@@ -33,15 +52,30 @@ function hfKey() {
 
 function apiFetch(url, init = {}) {
   const target = new URL(url);
+  const transport = target.protocol === "https:" ? httpsRequest : target.protocol === "http:" ? httpRequest : null;
+  if (!transport) return Promise.reject(new Error("Unsupported upstream protocol."));
+  const maxBytes = init.maxBytes ?? 2 * 1024 * 1024;
   return new Promise((resolve, reject) => {
-    const req = httpsRequest(
-      { hostname: target.hostname, path: target.pathname + target.search, method: init.method || "GET", headers: init.headers },
-      (res) => {
-        const chunks = [];
-        res.on("data", (c) => chunks.push(c));
-        res.on("end", () => resolve({ status: res.statusCode, buffer: Buffer.concat(chunks) }));
-      },
-    );
+    const req = transport(target.origin, {
+      hostname: init.hostname || target.hostname,
+      port: init.port || target.port || (target.protocol === "https:" ? 443 : 80),
+      family: init.family,
+      servername: init.servername,
+      method: init.method || "GET",
+      path: target.pathname + target.search,
+      headers: init.headers,
+    }, (res) => {
+      const chunks = [];
+      let bytes = 0;
+      res.on("data", (chunk) => {
+        bytes += chunk.length;
+        if (bytes > maxBytes) return req.destroy(new Error("Upstream response exceeded the size limit."));
+        chunks.push(chunk);
+      });
+      res.on("end", () => resolve({ status: res.statusCode, buffer: Buffer.concat(chunks) }));
+    });
+    const timer = setTimeout(() => req.destroy(new Error("Upstream request timed out.")), init.timeoutMs ?? 15_000);
+    req.on("close", () => clearTimeout(timer));
     req.on("error", reject);
     if (init.body) req.write(init.body);
     req.end();
@@ -60,8 +94,9 @@ async function hfGenerate(mode, payload, onStatus) {
   const accepted = JSON.parse(res.buffer.toString("utf8"));
   if (!accepted.status_url) throw new Error("Higgsfield did not return a status URL.");
   const statusPath = new URL(accepted.status_url).pathname + new URL(accepted.status_url).search;
+  const deadline = Date.now() + 8 * 60 * 1000;
   let delay = 2000;
-  for (;;) {
+  while (Date.now() < deadline) {
     await new Promise((r) => setTimeout(r, delay));
     const poll = await apiFetch(`https://api.higgsfield.ai${statusPath}`, { headers: { authorization: auth } });
     if (poll.status !== 200) throw new Error(`Status request failed (${poll.status})`);
@@ -75,12 +110,29 @@ async function hfGenerate(mode, payload, onStatus) {
     if (["failed", "nsfw", "canceled"].includes(current.status)) throw new Error(current.error?.message || `Generation ${current.status}`);
     delay = Math.min(delay * 1.5, 10000);
   }
+  throw new Error("Higgsfield generation timed out after 8 minutes.");
 }
 
 /* ---------------- product page reading ---------------- */
 
 async function fetchPage(url) {
-  const res = await apiFetch(url, { headers: { "user-agent": "Mozilla/5.0 (Launchframe)" } });
+  const target = new URL(url);
+  const invalid = (message) => Object.assign(new Error(message), { statusCode: 400 });
+  if (target.protocol !== "https:" || target.username || target.password || (target.port && target.port !== "443")) throw invalid("Use a public HTTPS product URL on port 443.");
+  const literalFamily = isIP(target.hostname);
+  const addresses = literalFamily
+    ? [{ address: target.hostname, family: literalFamily }]
+    : await dnsLookup(target.hostname, { all: true, verbatim: true });
+  if (!addresses.length || addresses.some(({ address, family }) => !isPublicAddress(address, family))) throw invalid("Product URL must resolve only to public IP addresses.");
+  const selected = addresses[0];
+  const res = await apiFetch(url, {
+    hostname: selected.address,
+    family: selected.family,
+    servername: literalFamily ? undefined : target.hostname,
+    maxBytes: 2 * 1024 * 1024,
+    timeoutMs: 10_000,
+    headers: { host: target.host, "user-agent": "Mozilla/5.0 (Launchframe)" },
+  });
   if (res.status !== 200) throw new Error(`Product page fetch failed (${res.status})`);
   return res.buffer.toString("utf8");
 }
@@ -140,43 +192,74 @@ function buildPlan(input, host) {
 
 /* ---------------- workflow state ---------------- */
 
-const workflows = new Map(); // id -> workflow (JSON shape the frontend expects)
-const uploads = new Map(); // id -> { founderVideo, founderVoice, logo } (file names)
-const drivers = new Map(); // id -> { canceled }
-let restored = false;
+const workflows = new Map();
+const uploads = new Map();
+const drivers = new Map();
+let restorePromise;
+
+async function ensureDataDir() {
+  await fs.mkdir(DATA_DIR, { recursive: true, mode: 0o700 });
+  const entries = await fs.readdir(DATA_DIR);
+  if (!entries.length) {
+    try { await fs.cp(LEGACY_DATA_DIR, DATA_DIR, { recursive: true, force: false }); }
+    catch (error) { if (error.code !== "ENOENT") throw error; }
+  }
+  await fs.chmod(DATA_DIR, 0o700);
+  await fs.rm(join(DATA_DIR, ".work"), { recursive: true, force: true });
+}
 
 async function persist() {
-  try {
-    await fs.mkdir(DATA_DIR, { recursive: true });
-    const rows = [...workflows.values()].filter((w) => w.status !== "running");
-    await fs.writeFile(join(DATA_DIR, "workflows.json"), JSON.stringify(rows, null, 1));
-    const manifest = {};
-    for (const [id, u] of uploads) Object.assign(manifest, { [id]: u });
-    await fs.writeFile(join(DATA_DIR, "media.json"), JSON.stringify(manifest, null, 1));
-  } catch { /* disk is optional; state survives in memory */ }
+  const rows = [...workflows.values()].filter((workflow) => workflow.status !== "running");
+  const manifest = Object.fromEntries(uploads);
+  for (const [name, value] of [["workflows.json", rows], ["media.json", manifest]]) {
+    const path = join(DATA_DIR, name);
+    const temp = `${path}.${process.pid}-${randomBytes(4).toString("hex")}.tmp`;
+    await fs.writeFile(temp, JSON.stringify(value, null, 1), { mode: 0o600 });
+    await fs.rename(temp, path);
+  }
 }
 
-async function restore() {
-  if (restored) return;
-  restored = true;
-  try {
-    const rows = JSON.parse(await fs.readFile(join(DATA_DIR, "workflows.json"), "utf8"));
-    for (const row of rows) workflows.set(row.id, { ...row, status: "draft" });
-    const manifest = JSON.parse(await fs.readFile(join(DATA_DIR, "media.json"), "utf8"));
-    for (const [id, u] of Object.entries(manifest)) uploads.set(id, u);
-  } catch { /* first run: nothing to restore */ }
+function restore() {
+  if (!restorePromise) restorePromise = (async () => {
+    await ensureDataDir();
+    try {
+      const rows = JSON.parse(await fs.readFile(join(DATA_DIR, "workflows.json"), "utf8"));
+      for (const row of rows) workflows.set(row.id, { ...row, status: row.status === "complete" ? "complete" : "draft" });
+    } catch (error) { if (error.code !== "ENOENT") throw error; }
+    try {
+      const manifest = JSON.parse(await fs.readFile(join(DATA_DIR, "media.json"), "utf8"));
+      for (const [id, value] of Object.entries(manifest)) uploads.set(id, value);
+    } catch (error) { if (error.code !== "ENOENT") throw error; }
+  })();
+  return restorePromise;
+}
+export async function launchframeVideoPath(id) {
+  await restore();
+  if (!/^[a-f\d]{12}$/i.test(id) || !workflows.get(id)?.videoUrl) return null;
+  return join(DATA_DIR, id, "cut.mp4");
 }
 
-function saveUploads(id, input) {
-  const names = { founderVideoBase64: "founder-video", founderVoiceBase64: "founder-voice", logoBase64: "logo" };
+async function saveUploads(id, input) {
+  const prepared = [];
+  for (const [key, config] of Object.entries(UPLOAD_LIMITS)) {
+    let encoded = input[key];
+    if (!encoded) continue;
+    if (typeof encoded !== "string") throw new Error("Invalid uploaded media.");
+    let type = input[`${key.replace("Base64", "Mime")}`];
+    const dataUrl = /^data:([^;,]+);base64,(.*)$/.exec(encoded);
+    if (dataUrl) { type = dataUrl[1]; encoded = dataUrl[2]; }
+    const ext = config.types[String(type).toLowerCase()];
+    const size = encoded.length * 3 / 4 - (encoded.endsWith("==") ? 2 : encoded.endsWith("=") ? 1 : 0);
+    if (!ext || !encoded || encoded.length % 4 !== 0) throw new Error(`Unsupported or invalid upload: ${config.stem}.`);
+    if (size > config.max) throw new Error(`${config.stem} exceeds the ${Math.floor(config.max / 1024 / 1024)} MB limit.`);
+    const blob = Buffer.from(encoded, "base64");
+    if (blob.toString("base64") !== encoded) throw new Error(`Unsupported or invalid upload: ${config.stem}.`);
+    prepared.push({ stem: config.stem, fileName: `${id}-${config.stem}.${ext}`, blob });
+  }
   const saved = {};
-  for (const [key, stem] of Object.entries(names)) {
-    const b64 = input[key];
-    if (!b64) continue;
-    const ext = b64.startsWith("iVBOR") ? "png" : stem.includes("video") ? "mp4" : "bin";
-    const fileName = `${id}-${stem}.${ext}`;
-    fs.writeFile(join(DATA_DIR, fileName), Buffer.from(b64, "base64")).catch(() => {});
-    saved[stem] = fileName;
+  for (const item of prepared) {
+    await fs.writeFile(join(DATA_DIR, item.fileName), item.blob, { mode: 0o600 });
+    saved[item.stem] = item.fileName;
   }
   uploads.set(id, saved);
   return saved;
@@ -188,9 +271,15 @@ function ffmpeg(args) {
   return new Promise((resolve, reject) => {
     const child = spawn("ffmpeg", ["-y", ...args], { stdio: ["ignore", "ignore", "pipe"] });
     let err = "";
-    child.stderr.on("data", (c) => err += c);
-    child.on("error", () => reject(new Error("ffmpeg binary is required for Launchframe export (brew install ffmpeg)")));
-    child.on("close", (code) => code === 0 ? resolve() : reject(new Error(`ffmpeg failed (${code}): ${err.slice(-400)}`)));
+    let timedOut = false;
+    const timer = setTimeout(() => { timedOut = true; child.kill("SIGKILL"); }, 5 * 60 * 1000);
+    child.stderr.on("data", (chunk) => { err = (err + chunk).slice(-4096); });
+    child.on("error", () => { clearTimeout(timer); reject(new Error("ffmpeg binary is required for Launchframe export (install ffmpeg).")); });
+    child.on("close", (code) => {
+      clearTimeout(timer);
+      if (timedOut) return reject(new Error("ffmpeg exceeded the 5-minute processing limit."));
+      code === 0 ? resolve() : reject(new Error(`ffmpeg failed (${code}): ${err.slice(-400)}`));
+    });
   });
 }
 
@@ -208,7 +297,8 @@ function colorCardArgs(color, duration) {
 }
 
 async function downloadClip(url, file) {
-  const res = await apiFetch(url, { headers: { "user-agent": "Mozilla/5.0" } });
+  if (!url.startsWith("https://")) throw new Error("Generated media must use HTTPS.");
+  const res = await apiFetch(url, { maxBytes: 128 * 1024 * 1024, timeoutMs: 60_000, headers: { "user-agent": "Mozilla/5.0" } });
   if (res.status !== 200) throw new Error(`Media fetch failed (${res.status})`);
   await fs.writeFile(file, res.buffer);
 }
@@ -238,53 +328,60 @@ async function buildLayerClip(layer, workDir, id) {
   return out;
 }
 
-async function runWorkflow(id, onProgress, onLog, driver) {
+async function runWorkflow(id, onProgress, onLog, driver, { generate = true } = {}) {
   const workflow = workflows.get(id);
-  const workDir = join(DATA_DIR, id);
-  await fs.mkdir(workDir, { recursive: true });
-  const aiBeats = workflow.plan.beats.filter((b) => b.requiresAI);
-  const generated = new Map(); // apiChoice id -> media URL
-  // 1) generate b-roll clips through Higgsfield
-  let index = 0;
-  for (const choice of workflow.plan.apiChoices) {
+  const workDir = join(DATA_DIR, ".work", id);
+  await fs.mkdir(workDir, { recursive: true, mode: 0o700 });
+  const aiBeats = workflow.plan.beats.filter((beat) => beat.requiresAI);
+  const generated = new Map();
+  if (generate) for (const [index, choice] of workflow.plan.apiChoices.entries()) {
     if (driver.canceled) throw new Error("Canceled");
-    index += 1;
-    onLog("generate", `Generating b-roll ${index}/${workflow.plan.apiChoices.length} (${choice.model})…`);
-    onProgress(Math.round(((index - 0.5) / workflow.plan.apiChoices.length) * 60));
-    const prompt = aiBeats[index - 1]?.text || workflow.plan.hook;
-    const url = hfKey()
-      ? await hfGenerate(choice.endpoint, { prompt, duration: 5, aspect_ratio: "16:9", resolution: "720p", sound: "on" }, (s) => onLog("generate", `B-roll ${index}: ${s}`))
-      : null;
+    onLog("generate", `Generating b-roll ${index + 1}/${workflow.plan.apiChoices.length} (${choice.model})…`);
+    onProgress(Math.round(((index + 0.5) / workflow.plan.apiChoices.length) * 60));
+    const url = await hfGenerate(choice.endpoint, { prompt: aiBeats[index]?.text || workflow.plan.hook, duration: 5, aspect_ratio: "16:9", resolution: "720p", sound: "on" }, (status) => onLog("generate", `B-roll ${index + 1}: ${status}`));
     if (url) generated.set(choice.id, url);
   }
-  if (!generated.size) onLog("generate", "No Higgsfield credentials — assembling from placeholder cards.");
-  // 2) build one clip per layer, concat,
+  if (generate && !generated.size) onLog("generate", "No generated clips — assembling placeholder cards.");
   onProgress(70);
   onLog("assemble", "Assembling the first cut…");
-  const layers = workflow.layers.filter((l) => l.removed !== true).sort((a, b) => a.order - b.order);
+  const layers = workflow.layers.filter((layer) => layer.removed !== true).sort((a, b) => a.order - b.order);
   if (!layers.length) throw new Error("All layers were removed.");
-  const parts = [];
   const urls = [...generated.values()];
-  for (const [i, layer] of layers.entries()) {
+  if (generate) {
+    let index = 0;
+    for (const layer of layers) if (layer.kind === "higgsfield" && urls[index]) layer.source = urls[index++];
+  }
+  const parts = [];
+  for (const [index, layer] of layers.entries()) {
     if (driver.canceled) throw new Error("Canceled");
     const withSource = layer.kind === "higgsfield" && urls.length
-      ? { ...layer, source: urls[Math.min(i, urls.length - 1)] }
+      ? { ...layer, source: layer.source || urls[Math.min(index, urls.length - 1)] }
       : layer;
     parts.push(await buildLayerClip(withSource, workDir, id));
   }
   onProgress(85);
-  const concatOut = join(workDir, "cut.mp4");
-  const inputs = parts.flatMap((p) => ["-i", p]);
-  const filter = parts.map((_, i) => `[${i}:v]scale=1280:720,setsar=30[v${i}]`).join(";")
-    + ";" + parts.map((_, i) => `[v${i}]`).join("") + `concat=n=${parts.length}:v=1:a=0[out]`;
-  await ffmpeg([...inputs, "-filter_complex", filter, "-map", "[out]", "-c:v", "libx264", "-preset", "veryfast", "-pix_fmt", "yuv420p", concatOut]);
+  const videoFile = join(workDir, "video.mp4");
+  const inputs = parts.flatMap((part) => ["-i", part]);
+  const filter = parts.map((_, index) => `[${index}:v]scale=1280:720,setsar=1[v${index}]`).join(";")
+    + ";" + parts.map((_, index) => `[v${index}]`).join("") + `concat=n=${parts.length}:v=1:a=0[out]`;
+  await ffmpeg([...inputs, "-filter_complex", filter, "-map", "[out]", "-c:v", "libx264", "-preset", "veryfast", "-pix_fmt", "yuv420p", videoFile]);
+  const outputDir = join(DATA_DIR, id);
+  const output = join(outputDir, "cut.mp4");
+  await fs.mkdir(outputDir, { recursive: true, mode: 0o700 });
+  const voice = uploads.get(id)?.["founder-voice"];
+  if (voice) {
+    const duration = layers.reduce((total, layer) => total + Math.max(0.5, layer.duration || 2), 0);
+    await ffmpeg(["-i", videoFile, "-i", join(DATA_DIR, voice), "-map", "0:v:0", "-map", "1:a:0", "-af", "apad", "-t", String(duration), "-c:v", "copy", "-c:a", "aac", "-b:a", "192k", output]);
+  } else {
+    await fs.rename(videoFile, output);
+  }
+  await fs.rm(workDir, { recursive: true, force: true });
   onProgress(100);
   onLog("done", "First cut assembled.");
-  const wf = workflows.get(id);
-  wf.status = "complete";
-  wf.progress = 100;
-  wf.videoUrl = `/launchframe-data/${id}/cut.mp4`;
-  wf.transcript.push({ step: "done", detail: "First cut assembled from the layer stack." });
+  workflow.status = "complete";
+  workflow.progress = 100;
+  workflow.videoUrl = `/launchframe-data/${id}/cut.mp4`;
+  workflow.transcript.push({ step: "done", detail: "First cut assembled from the layer stack." });
   await persist();
 }
 
@@ -315,28 +412,40 @@ function json(res, status, body) {
   res.end(JSON.stringify(body));
 }
 
-async function readBody(req, limit = 96 * 1024 * 1024) {
-  let data = "";
+async function readBody(req, limit = MAX_BODY_BYTES) {
+  const chunks = [];
+  let size = 0;
   for await (const chunk of req) {
-    data += chunk;
-    if (data.length > limit) throw new Error("Body too large");
+    size += chunk.length;
+    if (size > limit) {
+      const error = new Error("Request body exceeds the 64 MB limit.");
+      error.statusCode = 413;
+      throw error;
+    }
+    chunks.push(chunk);
   }
-  return data;
+  return Buffer.concat(chunks, size).toString("utf8");
 }
 
 const WORKFLOW_PATH = /^\/api\/workflows\/([^/]+)(?:\/(approve|start|layers|export))?$/;
 
 export async function handleLaunchframe(req, res, suffix) {
-  await restore();
   const path = suffix;
   const workflowMatch = path.match(WORKFLOW_PATH);
   try {
+    await restore();
     if (req.method === "POST" && path === "/api/workflows/plan") {
       const input = JSON.parse(await readBody(req));
+      if (!input || typeof input !== "object" || !["A", "B", "C"].includes(input.videoType)) return json(res, 400, { error: { message: "Choose a supported Launchframe video type." } });
+      if (input.instruction?.length > 1000) return json(res, 400, { error: { message: "Creative direction must be 1,000 characters or fewer." } });
+      if (typeof input.url !== "string" || input.url.length > 2048) return json(res, 400, { error: { message: "Product URL must be 2,048 characters or fewer." } });
+      if (typeof input.instruction !== "undefined" && typeof input.instruction !== "string") return json(res, 400, { error: { message: "Creative direction must be text." } });
+      const budget = Number(input.maxBudget);
+      if (!Number.isFinite(budget) || budget < 0 || budget > 50) return json(res, 400, { error: { message: "Budget must be between $0 and $50." } });
       let origin;
-      try { origin = new URL(input.url || ""); } catch { return json(res, 400, { error: { message: "Enter a complete product URL, including https://" } }); }
-      if (origin.protocol !== "https:" && origin.protocol !== "http:") return json(res, 400, { error: { message: "Enter a complete product URL, including https://" } });
-      if (input.videoType === "B" && !(input.founderVideoBase64 && input.founderVoiceBase64 && input.consent)) return json(res, 400, { error: { message: "Narrated demos need founder video, founder voice, and consent." } });
+      try { origin = new URL(input.url); } catch { return json(res, 400, { error: { message: "Enter a complete product URL, including https://" } }); }
+      if (origin.protocol !== "https:" || origin.username || origin.password || (origin.port && origin.port !== "443")) return json(res, 400, { error: { message: "Enter a public HTTPS product URL on port 443." } });
+      if (input.videoType === "B" && !(input.founderVideoBase64 && input.founderVoiceBase64 && input.consent === true)) return json(res, 400, { error: { message: "Narrated demos need founder video, founder voice, and consent." } });
       const host = origin.hostname.replace(/^www\./, "");
       let profile = { category: "Product launch", videoType: input.videoType, reasons: ["A concise visual reveal fits a first launch."], palette: ["#e9d4b9", "#1e2722"] };
       let usedFixture = false;
@@ -345,9 +454,12 @@ export async function handleLaunchframe(req, res, suffix) {
         const title = titleFromHtml(html, origin.toString());
         const category = categoryFromHtml(html);
         profile = { ...profile, category, reasons: [`${title} reads as ${category.toLowerCase()}.`] };
-      } catch { usedFixture = true; }
+      } catch (error) {
+        if (error.statusCode) throw error;
+        usedFixture = true;
+      }
       const id = createHash("sha1").update(`${Date.now()}-${origin.hostname}`).digest("hex").slice(0, 12);
-      const plan = buildPlan(input, host);
+      const plan = buildPlan({ ...input, maxBudget: budget }, host);
       const kindFor = (type) => type === "capture" ? "ui" : type === "generate" ? "higgsfield" : type;
       const workflow = {
         id, url: origin.toString(), status: "draft", progress: 0, plan,
@@ -360,8 +472,8 @@ export async function handleLaunchframe(req, res, suffix) {
         transcript: [{ step: "plan", detail: usedFixture ? "Page could not be fetched; building from the URL alone." : "Product page captured." }],
         profile, usedFixture,
       };
+      await saveUploads(id, input);
       workflows.set(id, workflow);
-      saveUploads(id, input);
       await persist();
       return json(res, 200, workflow);
     }
@@ -369,9 +481,10 @@ export async function handleLaunchframe(req, res, suffix) {
     if (workflowMatch && req.method === "POST" && workflowMatch[2] === "approve") {
       const wf = workflows.get(workflowMatch[1]);
       if (!wf) return json(res, 404, { error: { message: "Workflow not found" } });
+      if (wf.status !== "draft") return json(res, 409, { error: { message: "Only a draft plan can be approved." } });
       const body = JSON.parse(await readBody(req));
-      const max = Math.max(0, Number(body.maxBudget) || 0);
-      if (wf.plan && max < wf.plan.estimatedCost) return json(res, 400, { error: { message: `Budget $${max} is below the estimated $${wf.plan.estimatedCost}.` } });
+      const max = Number(body.maxBudget);
+      if (!Number.isFinite(max) || max < (wf.plan?.estimatedCost ?? 0) || max > 50) return json(res, 400, { error: { message: "Budget must cover the estimate and cannot exceed $50." } });
       wf.status = "approved";
       wf.plan.maxBudget = max;
       await persist();
@@ -381,17 +494,31 @@ export async function handleLaunchframe(req, res, suffix) {
     if (workflowMatch && req.method === "POST" && workflowMatch[2] === "start") {
       const wf = workflows.get(workflowMatch[1]);
       if (!wf) return json(res, 404, { error: { message: "Workflow not found" } });
-      if (wf.status !== "approved") return json(res, 400, { error: { message: "Approve the plan before starting production." } });
-      if (!(await hasFfmpeg())) return json(res, 500, { error: { message: "ffmpeg is not installed — needed to assemble the cut. brew install ffmpeg." } });
-      if (!hfKey()) return json(res, 503, { error: { message: "Higgsfield credentials are not configured — b-roll generation needs them. Add them to .env for real clips." } });
+      if (wf.status !== "approved") return json(res, 409, { error: { message: "Approve the plan before starting production." } });
+      if (drivers.size) return json(res, 429, { error: { message: "Another Launchframe export is already running." } });
+      const driver = { canceled: false };
+      drivers.set(wf.id, driver);
+      if (!hfKey()) {
+        drivers.delete(wf.id);
+        return json(res, 503, { error: { message: "Higgsfield credentials are not configured — b-roll generation needs them. Add them to .env for real clips." } });
+      }
+      if (!(await hasFfmpeg())) {
+        drivers.delete(wf.id);
+        return json(res, 500, { error: { message: "ffmpeg is not installed — needed to assemble the cut." } });
+      }
       wf.status = "running";
       wf.progress = 5;
       wf.error = undefined;
-      const driver = { canceled: false };
-      drivers.set(wf.id, driver);
-      runWorkflow(wf.id, (p) => { wf.progress = p; }, (step, detail) => { wf.transcript.push({ step, detail }); }, driver)
-        .then(() => { drivers.delete(wf.id); })
-        .catch(async (e) => { wf.status = "failed"; wf.error = e.message; drivers.delete(wf.id); await persist(); });
+      void runWorkflow(wf.id, (progress) => { wf.progress = progress; }, (step, detail) => { wf.transcript.push({ step, detail }); }, driver)
+        .catch(async (error) => {
+          wf.status = "failed";
+          wf.error = error.message;
+          await persist().catch((saveError) => console.error("Could not save Launchframe failure:", saveError));
+        })
+        .finally(() => {
+          drivers.delete(wf.id);
+          void fs.rm(join(DATA_DIR, ".work", wf.id), { recursive: true, force: true }).catch(() => {});
+        });
       return json(res, 200, { id: wf.id, status: "running" });
     }
 
@@ -404,13 +531,15 @@ export async function handleLaunchframe(req, res, suffix) {
     if (workflowMatch && req.method === "PATCH" && workflowMatch[2] === "layers") {
       const wf = workflows.get(workflowMatch[1]);
       if (!wf) return json(res, 404, { error: { message: "Workflow not found" } });
+      if (wf.status !== "complete") return json(res, 409, { error: { message: "Only a completed workflow can be polished." } });
       const body = JSON.parse(await readBody(req));
+      if (!Array.isArray(body.layers) || body.layers.length > 100) return json(res, 400, { error: { message: "Send at most 100 layer edits." } });
       for (const edit of body.layers || []) {
-        const layer = wf.layers.find((l) => l.id === edit.id);
+        const layer = wf.layers.find((item) => item.id === edit.id);
         if (!layer) continue;
         if (edit.removed) { layer.removed = true; continue; }
-        if (edit.order !== undefined) layer.order = edit.order;
-        if (edit.duration !== undefined) layer.duration = Math.max(0.5, Math.min(30, edit.duration));
+        if (Number.isFinite(edit.order)) layer.order = edit.order;
+        if (Number.isFinite(edit.duration)) layer.duration = Math.max(0.5, Math.min(30, edit.duration));
         if (edit.text !== undefined) layer.text = String(edit.text).slice(0, 80);
       }
       await persist();
@@ -420,31 +549,37 @@ export async function handleLaunchframe(req, res, suffix) {
     if (workflowMatch && req.method === "POST" && workflowMatch[2] === "export") {
       const wf = workflows.get(workflowMatch[1]);
       if (!wf) return json(res, 404, { error: { message: "Workflow not found" } });
-      if (wf.status === "complete") return json(res, 200, { id: wf.id, videoUrl: wf.videoUrl });
-      // not produced yet: run the full pipeline now (without keys it assembles placeholder cards so the flow is demonstrable)
-      if (!(await hasFfmpeg())) return json(res, 500, { error: { message: "ffmpeg is not installed — needed to assemble the cut. brew install ffmpeg." } });
-      wf.status = "running";
-      wf.progress = 5;
+      if (wf.status !== "complete") return json(res, 409, { error: { message: "Production must complete before polishing or exporting." } });
+      if (drivers.size) return json(res, 429, { error: { message: "Another Launchframe export is already running." } });
       const driver = { canceled: false };
       drivers.set(wf.id, driver);
-      runWorkflow(wf.id, (p) => { wf.progress = p; }, (step, detail) => { wf.transcript.push({ step, detail }); }, driver)
-        .then(() => { drivers.delete(wf.id); })
-        .catch(async (e) => { wf.status = "failed"; wf.error = e.message; drivers.delete(wf.id); await persist(); });
-      // ponytail: export waits by polling in-process state; ties one request. Fine for local single-user.
-      for (let i = 0; i < 240 && workflows.get(wf.id).status === "running"; i++) await new Promise((r) => setTimeout(r, 2500));
-      const now = workflows.get(wf.id);
-      if (now.status !== "complete") return json(res, 503, { error: { message: now.error || "Export did not finish in time." } });
-      return json(res, 200, { id: now.id, videoUrl: now.videoUrl });
+      wf.status = "running";
+      wf.error = undefined;
+      try {
+        if (!(await hasFfmpeg())) throw new Error("ffmpeg is not installed — needed to assemble the cut.");
+        await runWorkflow(wf.id, (progress) => { wf.progress = progress; }, (step, detail) => { wf.transcript.push({ step, detail }); }, driver, { generate: false });
+        return json(res, 200, { id: wf.id, videoUrl: wf.videoUrl });
+      } catch (error) {
+        wf.status = "complete";
+        wf.error = error.message;
+        await persist().catch((saveError) => console.error("Could not save Launchframe export failure:", saveError));
+        return json(res, 500, { error: { message: wf.error } });
+      } finally {
+        drivers.delete(wf.id);
+        await fs.rm(join(DATA_DIR, ".work", wf.id), { recursive: true, force: true }).catch(() => {});
+      }
     }
 
     if (req.method === "POST" && path === "/api/conversation/chat") {
       const body = JSON.parse(await readBody(req));
+      if (!body || typeof body.message !== "string" || body.message.length > 2000) return json(res, 400, { error: { message: "Chat message must be 2,000 characters or fewer." } });
       const wf = body.workflowId ? workflows.get(body.workflowId) : undefined;
       return json(res, 200, { reply: chatReply(body.message, wf) });
     }
 
     return json(res, 404, { error: { message: "Not found" } });
   } catch (error) {
-    return json(res, 400, { error: { message: error instanceof Error ? error.message : "Bad request" } });
+    return json(res, error.statusCode || 400, { error: { message: error instanceof Error ? error.message : "Bad request" } });
   }
 }
+

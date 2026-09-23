@@ -7,7 +7,7 @@ const CLOUDFRONT = "https://d28lhcrx5qdowv.cloudfront.net";
 
 export default defineConfig(({ mode }) => {
   const env = loadEnv(mode, process.cwd(), "");
-  const launchframeTarget = env.LAUNCHFRAME_URL || "http://localhost:3000";
+  const launchframeTarget = `http://127.0.0.1:${Number(env.PORT) || 3000}`;
   const hasHiggsfieldCredentials = Boolean(env.HF_API_KEY_ID && env.HF_API_KEY_SECRET);
   const hasPexelsCredentials = Boolean(env.PEXELS_API_KEY);
   const higgsfieldApi: ProxyOptions = {
@@ -29,7 +29,6 @@ export default defineConfig(({ mode }) => {
       target: launchframeTarget,
       changeOrigin: true,
       secure: false,
-      rewrite: (path: string) => path.replace(/^\/launchframe-api/, ""),
     },
     "/hfapi": higgsfieldApi,
     "/hfdata": {

@@ -3,7 +3,7 @@ import { request as proxyRequestTls } from "node:https";
 import { createReadStream, promises as fs } from "node:fs";
 import { extname, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
-import { handleLaunchframe } from "./launchframe.mjs";
+import { handleLaunchframe, launchframeVideoPath } from "./launchframe.mjs";
 
 const root = resolve(fileURLToPath(new URL("./dist/", import.meta.url)));
 const id = process.env.HF_API_KEY_ID?.trim();
@@ -30,7 +30,6 @@ const mime = {
   ".webm": "video/webm", ".webp": "image/webp", ".woff": "font/woff", ".woff2": "font/woff2",
 };
 const hopByHop = new Set(["connection", "keep-alive", "proxy-authenticate", "proxy-authorization", "te", "trailers", "transfer-encoding", "upgrade"]);
-const dataRoot = resolve(fileURLToPath(new URL("./launchframe-data/", import.meta.url)));
 
 function send(res, status, body) {
   res.writeHead(status, { "Content-Type": "application/json; charset=utf-8", "Cache-Control": "no-store" });
@@ -74,16 +73,13 @@ async function serve(req, res) {
   try { pathname = decodeURIComponent(new URL(req.url, "http://localhost").pathname); }
   catch { return send(res, 400, { error: "Invalid path" }); }
   if (pathname.startsWith("/launchframe-data/")) {
-    const file = resolve(dataRoot, "." + "/" + pathname.slice("/launchframe-data/".length));
-    if (file !== dataRoot && file.startsWith(dataRoot + sep)) {
-      const info = await fs.stat(file).catch(() => null);
-      if (info?.isFile()) {
-        res.writeHead(200, { "Content-Type": mime[extname(file).toLowerCase()] || "application/octet-stream", "Content-Length": info.size });
-        if (req.method === "HEAD") return res.end();
-        return createReadStream(file).on("error", () => res.destroy()).pipe(res);
-      }
-    }
-    return send(res, 404, { error: "Not found" });
+    const match = /^\/launchframe-data\/([a-f\d]{12})\/cut\.mp4$/i.exec(pathname);
+    const file = match && await launchframeVideoPath(match[1]);
+    const info = file && await fs.stat(file).catch(() => null);
+    if (!info?.isFile()) return send(res, 404, { error: "Not found" });
+    res.writeHead(200, { "Content-Type": "video/mp4", "Content-Length": info.size, "Cache-Control": "private, no-store" });
+    if (req.method === "HEAD") return res.end();
+    return createReadStream(file).on("error", () => res.destroy()).pipe(res);
   }
   const file = resolve(root, "." + pathname);
   if (file !== root && !file.startsWith(root + sep)) return send(res, 403, { error: "Forbidden" });
@@ -111,11 +107,19 @@ async function serve(req, res) {
     if (req.method === "HEAD") res.end(); else res.end(html);
     return;
   }
-  if (req.method === "HEAD") res.end();
+  if (req.method === "HEAD") return res.end();
   createReadStream(actual).on("error", () => res.destroy()).pipe(res);
 }
 
+function isLocalOrigin(value) {
+  if (!value) return true;
+  try { return ["localhost", "127.0.0.1", "::1", "[::1]"].includes(new URL(value).hostname); }
+  catch { return false; }
+}
+
+
 createServer((req, res) => {
+  if (req.headers["sec-fetch-site"] === "cross-site" || !isLocalOrigin(req.headers.origin)) return send(res, 403, { error: "Local app requests only" });
   if (req.url === "/launchframe-api" || req.url.startsWith("/launchframe-api/")) {
     const suffix = req.url.slice("/launchframe-api".length) || "/";
     return void handleLaunchframe(req, res, suffix);
@@ -123,4 +127,4 @@ createServer((req, res) => {
   const route = routes.find(({ prefix }) => req.url === prefix || req.url.startsWith(prefix + "/") || req.url.startsWith(prefix + "?"));
   if (route) return void proxy(req, res, route);
   void serve(req, res);
-}).listen(Number(process.env.PORT) || 3000, process.env.HOST || "0.0.0.0");
+}).listen(Number(process.env.PORT) || 3000, process.env.HOST || "127.0.0.1");

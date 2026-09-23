@@ -445,7 +445,7 @@ export default function Workspace() {
   const [assets, setAssets] = useState<LocalAsset[]>([]);
   const assetsRef = useRef(assets);
   const [assetSaveErrors, setAssetSaveErrors] = useState<Record<string, string>>({});
-  const [stockResults, setStockResults] = useState<StockClip[]>([]);
+  const [stockResults, setStockResults] = useState<StockClip[]>();
   const [stockBusy, setStockBusy] = useState(false);
   const [stockError, setStockError] = useState("");
   useEffect(() => {
